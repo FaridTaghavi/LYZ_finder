@@ -1,0 +1,16 @@
+# build artifacts
+build/
+*.o
+*.so
+*.out
+*.exe
+
+# ROOT / CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# editor junk
+*.swp
+*~
