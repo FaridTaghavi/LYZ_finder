@@ -30,7 +30,7 @@
 #include "TError.h"
 #include <Math/GSLMultiRootFinder.h> 
 #include <Math/IFunction.h>
-#include <chrono>
+
 namespace {
 
 std::complex<double> J0_complex(const std::complex<double>& z)
@@ -197,7 +197,7 @@ private:
 };
 
 
-void LYZ(const char* filename = "PbPb_central_411.dat")
+void LYZ(const char* filename = "/home/farid/MyRepositories/Paper_drafts/LYZ_paper/trento_events/PbPb_central_4.dat")
 {
     std::ifstream file(filename);
 
@@ -216,14 +216,14 @@ void LYZ(const char* filename = "PbPb_central_411.dat")
 
     std::string line;
 	
-	// int max_events = 10000;
-	// int counter = 0;
+	int max_events = 10000;
+	int counter = 0;
     while (std::getline(file, line)) {
         if (line.empty()) continue;
         if (line[0] == '#') continue;
 		
-	// 	counter ++;
-	//	if (counter == max_events) break;
+		counter ++;
+		if (counter == max_events) break;
         
 		std::istringstream iss(line);
 
@@ -257,20 +257,11 @@ void LYZ(const char* filename = "PbPb_central_411.dat")
     finder.AddFunction(f_im, 2);
 	
 	double x0[2] = {50.0, 10.0};
-
-	auto t1 = std::chrono::high_resolution_clock::now();
+	
 	bool ok = finder.Solve(x0, 1000, 1e-10, 1e-10);
-	auto t2 = std::chrono::high_resolution_clock::now();
-    
 
-double time_ms =
-    std::chrono::duration<double, std::milli>(t2 - t1).count();
-
-std::cout << "No-derivative method time = "
-          << time_ms << " ms\n";
-
-	const double* root = finder.X();
-    	const double* fval = finder.FVal();
+    const double* root = finder.X();
+    const double* fval = finder.FVal();
 
     std::cout << "success = " << ok << "\n";
     std::cout << "status  = " << finder.Status() << "\n";
@@ -282,67 +273,6 @@ std::cout << "No-derivative method time = "
 	// Find complex zeros ---> Method DOES need derivative
 
 
-
-ReMeanJ0Grad fp_re(e2_list);
-ImMeanJ0Grad fp_im(e2_list);
-
-ROOT::Math::GSLMultiRootFinder finderp(
-    ROOT::Math::GSLMultiRootFinder::kHybridSJ
-);
-
-finderp.AddFunction(fp_re);
-finderp.AddFunction(fp_im);
-
-double x0p[2] = {50.0, 10.0};
-
-
-auto tp1 = std::chrono::high_resolution_clock::now();
-bool okp = finderp.Solve(x0p, 1000, 1e-10, 1e-10);
-auto tp2 = std::chrono::high_resolution_clock::now();
-
-double timep_ms =
-    std::chrono::duration<double, std::milli>(tp2 - tp1).count();
-
-std::cout << "Derivative method time = "
-          << timep_ms << " ms\n";
-
-
-const double* rootp = finderp.X();
-const double* fvalp = finderp.FVal();
-
-std::cout << "success = " << okp << "\n";
-std::cout << "status  = " << finderp.Status() << "\n";
-
-if (okp) {
-    std::cout << "k = " << rootp[0] << " + i " << rootp[1] << "\n";
-    std::cout << "F(k) = " << fvalp[0] << " , " << fvalp[1] << "\n";
-}
-
-
-
-
-
-//     ReMeanJ0Grad fp_re(e2_list);
-// 	ImMeanJ0Grad fp_im(e2_list);
-// 
-// 	ROOT::Math::GSLMultiRootFinder finderp(
-//     		ROOT::Math::GSLMultiRootFinder::kHybridSJ
-// 	);
-// 
-// 	finderp.AddFunction(fp_re);
-// 	finderp.AddFunction(fp_im);
-// 
-// 	double x0p[2] = {50.0, 10.0};
-// 
-// 	bool okp = finder.Solve(x0p, 1000, 1e-10, 1e-10);
-// 
-//     const double* rootp = finderp.X();
-//     const double* fvalp = finderp.FVal();
-// 
-//     std::cout << "success = " << okp << "\n";
-//     std::cout << "status  = " << finderp.Status() << "\n";
-//     std::cout << "k = " << rootp[0] << " + i " << rootp[1] << "\n";
-//     std::cout << "F(k) = " << fvalp[0] << " , " << fvalp[1] << "\n";
 
 	
 	// TGraph* gr = new TGraph();
