@@ -199,21 +199,21 @@ void LYZ(const char* filename = "PbPb_events.root")
 	
 	
 	// Searching the root in (ReZ, ImZ) plane
-	const double re_min {5.0};
-	const double re_max {120.0};
-	const double dre    {3.0};
+	const double re_min {30.0};
+	const double re_max {80.0};
+	const double dre    {15.0};
 	const double im_min {0.0};
-	const double im_max {50};
-	const double dim    {1.0};
+	const double im_max {30};
+	const double dim    {10.0};
     
 	const double max_found_root_size = 2 * std::sqrt( re_max * re_max + im_max * im_max ); // sometimes the rootfinder finds very big roots, we discard them. 
 	
 	// Bootstrap
 	const int Nsub = 10;  // Bootstrap subsample
-	const int Nres = 100; // Bootstrap resampling time
+	const int Nres = 500; // Bootstrap resampling time
 	
 	// Be careful to remove it later!
-	const std::size_t max_events = 10000;
+	const std::size_t max_events = 10000000;
 	
 	// Numebr of cores in searching for the roots
 	const int ncore = 13;
@@ -283,7 +283,7 @@ void LYZ(const char* filename = "PbPb_events.root")
 	        );
 	    }
 		std::cout << "----------------------------------\n";	
-    	std::cout << "Bootstrap sample " << ires
+    	std::cout << "Bootstrap sample " << ires + 1
     	          << " out of " << Nres
     	          << " resampling.\n";	
 		std::cout << "----------------------------------\n";	
