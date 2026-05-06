@@ -6,6 +6,8 @@
 #include <stdexcept>
 #include <utility>
 #include <vector>
+#include <random>
+
 
 #include "TCanvas.h"
 #include "TGraph.h"
@@ -16,8 +18,9 @@
 #include <TTreeReader.h>
 #include <TTreeReaderValue.h>
 #include <TTreeReaderArray.h>
-
-
+#include <TH2D.h>
+#include <TError.h>
+#include <gsl/gsl_errno.h>
 #include "Math/Functor.h"
 #include "Math/RootFinder.h"
 
@@ -189,9 +192,34 @@ RootResult FindComplexZero_noDerivative(
 
     return result;
 }
+
+
 void LYZ(const char* filename = "PbPb_events.root")
 {
-    TFile file(filename, "READ");
+	
+	
+	// Searching the root in (ReZ, ImZ) plane
+	const double re_min {5.0};
+	const double re_max {120.0};
+	const double dre    {3.0};
+	const double im_min {0.0};
+	const double im_max {50};
+	const double dim    {1.0};
+    
+	const double max_found_root_size = 2 * std::sqrt( re_max * re_max + im_max * im_max ); // sometimes the rootfinder finds very big roots, we discard them. 
+	
+	// Bootstrap
+	const int Nsub = 10;  // Bootstrap subsample
+	const int Nres = 100; // Bootstrap resampling time
+	
+	// Be careful to remove it later!
+	const std::size_t max_events = 10000;
+	
+	// Numebr of cores in searching for the roots
+	const int ncore = 13;
+	
+	
+	TFile file(filename, "READ");
 
     if (file.IsZombie()) {
         std::cerr << "Error: cannot open ROOT file "
@@ -206,13 +234,20 @@ void LYZ(const char* filename = "PbPb_events.root")
 	event_CLASS* event = nullptr;
 	tree->SetBranchAddress("events", &event);
 	
-	std::vector<double> e2_list;
-	e2_list.reserve(tree->GetEntries());
 	
-	const std::size_t max_events = 10000;
 	const std::size_t nevents =
 	    std::min<std::size_t>(max_events, tree->GetEntries());
+
 	
+	// Keeping unbunched events are needed anymore!
+	// std::vector<double> e2_list;
+	// e2_list.reserve(nevents);
+		
+
+	std::vector<std::vector<double>> subsamples(Nsub);
+
+
+	// Reading ttree and fill the subsample	
 	for (std::size_t i = 0; i < nevents; ++i) {
 	    tree->GetEntry(i);
 	
@@ -220,37 +255,205 @@ void LYZ(const char* filename = "PbPb_events.root")
 	    double ey2 = event->Get_epsilony(2);
 	
 	    double e2 = std::sqrt(ex2 * ex2 + ey2 * ey2);
-	    e2_list.push_back(e2);
+	    
+		// e2_list.push_back(e2); //Not needed anymore!
+
+    	size_t isub = i % Nsub;
+    	subsamples[isub].push_back(e2);
 	}
 	
-	std::cout << "Loaded " << e2_list.size()
-              << " events from ROOT file\n";
+	
+	std::mt19937 rng(12345);
+	std::uniform_int_distribution<int> dist(0, Nsub - 1);
+	
+	std::vector<std::vector<RootResult>> roots_from_resampling;
+	
+	for (int ires = 0; ires < Nres; ++ires) {
+	
+	    std::vector<double> e2_bootstrap;
+	    e2_bootstrap.reserve(nevents);
+	
+	    for (int isub = 0; isub < Nsub; ++isub) {
+	        int pick = dist(rng);
+	
+	        e2_bootstrap.insert(
+	            e2_bootstrap.end(),
+	            subsamples[pick].begin(),
+	            subsamples[pick].end()
+	        );
+	    }
+		std::cout << "----------------------------------\n";	
+    	std::cout << "Bootstrap sample " << ires
+    	          << " out of " << Nres
+    	          << " resampling.\n";	
+		std::cout << "----------------------------------\n";	
+	
+		std::vector<RootResult> roots;
+	
+	
+		int Nre = static_cast<int>((re_max - re_min) / dre);
+		int Nim = static_cast<int>((im_max - im_min) / dim);
 
-    if (e2_list.empty()) {
-        std::cerr << "No events were read.\n";
-        return;
-    }
+		// Turn off the root finder warning info
+		gsl_set_error_handler_off();
+		gErrorIgnoreLevel = kWarning;
+		gErrorIgnoreLevel = kFatal;	
+		
+		omp_set_num_threads(ncore);
+		#pragma omp parallel
+		{
+		    std::vector<RootResult> local_roots;
+		
+		    #pragma omp for schedule(dynamic)
+		    for (int ire = 0; ire <= Nre; ++ire) {
+		        
+				double re = re_min + ire * dre;
+		        #pragma omp critical
+		        {
+		            std::cout << "Real: " << re << "\n";
+		        }
+		        for (int iim = 0; iim <= Nim; ++iim) {
+		
+		            double im = im_min + iim * dim;
+		
+		            RootResult r = FindComplexZero_noDerivative(e2_bootstrap, re, im);
+		
+					if (!r.ok) continue;
+					if (r.status != 0) continue;
+					if (!std::isfinite(r.k.real()) || !std::isfinite(r.k.imag())) continue;
+					if (std::abs(r.F) > 1e-8) continue;
+
+					const double axis_tol = 1e-8;
+
+					if (r.k.real() < -axis_tol) continue;
+					if (r.k.imag() < -axis_tol) continue;
+					
+					if (std::abs(r.k.real()) < axis_tol) r.k.real(0.0);
+					if (std::abs(r.k.imag()) < axis_tol) r.k.imag(0.0);
+
+					if (std::abs(r.k) > max_found_root_size)
+    					continue;
+		            local_roots.push_back(r);
+		
+		        }
+		    }
+		
+		    #pragma omp critical
+		    {
+		        roots.insert(roots.end(), local_roots.begin(), local_roots.end());
+		    }
+		}
+
+		std::vector<RootResult> unique_roots;
+		
+		const double tol = 1e-6;
+		
+		for (const auto& r : roots) {
+		
+		    bool duplicate = false;
+		
+		    for (const auto& u : unique_roots) {
+		
+		        if (std::abs(r.k - u.k) < tol) {
+		            duplicate = true;
+		            break;
+		        }
+		    }
+		
+		    if (!duplicate) {
+		        unique_roots.push_back(r);
+		    }
+		}
+
+		std::sort(
+		    unique_roots.begin(),
+		    unique_roots.end(),
+		    [](const RootResult& a, const RootResult& b) {
+		        return std::abs(a.k) < std::abs(b.k);
+		    }
+		);
+		roots_from_resampling.push_back(unique_roots);
+	}
+
+
+	// Write in a .dat file
+	std::ofstream out("bootstrap_roots.dat");
+	
+	if (!out.is_open()) {
+	    std::cerr << "Cannot open output file\n";
+	    return;
+	}
+	
+	out << "# ires  iroot  Re(k)  Im(k)  Re(F)  Im(F)\n";
+	
+	for (std::size_t ires = 0;
+	     ires < roots_from_resampling.size();
+	     ++ires) {
+	
+	    const auto& roots = roots_from_resampling[ires];
+	
+	    for (std::size_t iroot = 0;
+	         iroot < roots.size();
+	         ++iroot) {
+	
+	        const auto& r = roots[iroot];
+	
+	        out
+	            << ires << " "
+	            << iroot << " "
+	            << r.k.real() << " "
+	            << r.k.imag() << " "
+	            << r.F.real() << " "
+	            << r.F.imag() << "\n";
+	    }
+	}
+	
+	out.close();
+
+	// Fill a 2D histogram
+	TH2D* h_roots = new TH2D(
+	    "h_roots",
+	    "Bootstrap roots;Re(k);Im(k)",
+	    200, 0, 0.7 * max_found_root_size,
+	    200, 0, 1.1 * im_max
+	);
+	
+	for (const auto& roots : roots_from_resampling) {
+	    for (const auto& r : roots) {
+	        h_roots->Fill(r.k.real(), r.k.imag());
+	    }
+	}
+
+
+	TFile outFile("bootstrap_roots_hist.root", "RECREATE");
+	h_roots->Write();
+	outFile.Close();
+
+	TCanvas* c = new TCanvas("c_roots", "Bootstrap roots", 800, 700);
+	h_roots->Draw("COLZ");
+	c->SaveAs("bootstrap_roots_hist.pdf");
+	
+	// std::cout << "Loaded " << e2_list.size()
+    //           << " events from ROOT file\n";
+
+    // if (e2_list.empty()) {
+    //     std::cerr << "No events were read.\n";
+    //     return;
+    // }
 
 
 	// Find complex zeros ---> Method does not need derivative
 
 
-	RootResult r = FindComplexZero_noDerivative(e2_list, 50.0, 10.0);
-	
-	std::cout << "success = " << r.ok << "\n";
-	std::cout << "status  = " << r.status << "\n";
-	std::cout << "k = " << r.k.real() << " + i " << r.k.imag() << "\n";
-	std::cout << "F(k) = " << r.F.real() << " , " << r.F.imag() << "\n";
-	std::cout << "time = " << r.time_ms << " ms\n";
+	// RootResult r = FindComplexZero_noDerivative(e2_list, 50.0, 10.0);
+	// 
+	// std::cout << "success = " << r.ok << "\n";
+	// std::cout << "status  = " << r.status << "\n";
+	// std::cout << "k = " << r.k.real() << " + i " << r.k.imag() << "\n";
+	// std::cout << "F(k) = " << r.F.real() << " , " << r.F.imag() << "\n";
+	// std::cout << "time = " << r.time_ms << " ms\n";
 
-	std::vector<RootResult> roots;
 
-	double re_min {5.0};
-	double re_max {120.0};
-	double dre    {3.0};
-	double im_min {0.0};
-	double im_max {50};
-	double dim    {1.0};
 
 	// for (double re = re_min; re <= re_max; re += dre) {
 	//     for (double im = im_min; im <= im_max; im += dim) {
@@ -265,97 +468,24 @@ void LYZ(const char* filename = "PbPb_events.root")
 	// 		std::cout << "Real: " << re << ", Imeaginary: " << im << "\n";
 	//     }
 	// }
-	int Nre = static_cast<int>((re_max - re_min) / dre);
-	int Nim = static_cast<int>((im_max - im_min) / dim);
-	omp_set_num_threads(8);
-	#pragma omp parallel
-	{
-	    std::vector<RootResult> local_roots;
-	
-	    #pragma omp for collapse(2) schedule(dynamic)
-	    for (int ire = 0; ire <= Nre; ++ire) {
-	        for (int iim = 0; iim <= Nim; ++iim) {
-	
-	            double re = re_min + ire * dre;
-	            double im = im_min + iim * dim;
-	
-	            RootResult r = FindComplexZero_noDerivative(e2_list, re, im);
-	
-				if (!r.ok) continue;
-				if (r.status != 0) continue;
-				if (!std::isfinite(r.k.real()) || !std::isfinite(r.k.imag())) continue;
-				if (std::abs(r.F) > 1e-8) continue;
-
-				const double axis_tol = 1e-8;
-
-				if (r.k.real() < -axis_tol) continue;
-				if (r.k.imag() < -axis_tol) continue;
-				
-				if (std::abs(r.k.real()) < axis_tol) r.k.real(0.0);
-				if (std::abs(r.k.imag()) < axis_tol) r.k.imag(0.0);
-
-	            local_roots.push_back(r);
-	
-	            #pragma omp critical
-	            {
-	                std::cout << "Real: " << re
-	                          << ", Imaginary: " << im << "\n";
-	            }
-	        }
-	    }
-	
-	    #pragma omp critical
-	    {
-	        roots.insert(roots.end(), local_roots.begin(), local_roots.end());
-	    }
-	}
-
-	std::vector<RootResult> unique_roots;
-	
-	const double tol = 1e-6;
-	
-	for (const auto& r : roots) {
-	
-	    bool duplicate = false;
-	
-	    for (const auto& u : unique_roots) {
-	
-	        if (std::abs(r.k - u.k) < tol) {
-	            duplicate = true;
-	            break;
-	        }
-	    }
-	
-	    if (!duplicate) {
-	        unique_roots.push_back(r);
-	    }
-	}
-
-	std::sort(
-	    unique_roots.begin(),
-	    unique_roots.end(),
-	    [](const RootResult& a, const RootResult& b) {
-	        return std::abs(a.k) < std::abs(b.k);
-	    }
-	);
 
 	// Print ---
-	for (const auto& r : unique_roots) {
-	
-	    std::cout
-	        << "k = "
-	        << r.k.real()
-	        << " + i "
-	        << r.k.imag()
-	        << "\n";
-	
-	    // std::cout
-	    //     << "F(k) = "
-	    //     << r.F.real()
-	    //     << " + i "
-	    //     << r.F.imag()
-	    //     << "\n";
-	}
+	// for (const auto& r : unique_roots) {
+	// 
+	//     std::cout
+	//         << "k = "
+	//         << r.k.real()
+	//         << " + i "
+	//         << r.k.imag()
+	//         << "\n";
+	// 
+	//     // std::cout
+	//     //     << "F(k) = "
+	//     //     << r.F.real()
+	//     //     << " + i "
+	//     //     << r.F.imag()
+	//     //     << "\n";
+	// }
 	
 	// TGraph* gr = new TGraph();
 
