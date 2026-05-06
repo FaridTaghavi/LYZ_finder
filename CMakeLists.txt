@@ -10,7 +10,7 @@ set(BUILD_TESTING OFF CACHE BOOL "Build tests" FORCE)
 add_subdirectory(complex_bessel)
 
 find_package(ROOT REQUIRED COMPONENTS Core Graf Gpad MathCore RIO Hist MathMore Tree)
-
+find_package(OpenMP REQUIRED)
 add_executable(LYZ main.cpp LYZ.C)
 
 target_link_libraries(LYZ PRIVATE
@@ -22,4 +22,5 @@ target_link_libraries(LYZ PRIVATE
     ROOT::RIO
     ROOT::Hist
     ROOT::Gpad
+    OpenMP::OpenMP_CXX
 )
