@@ -11,6 +11,12 @@
 #include "TGraph.h"
 #include "TMath.h"
 #include "TAxis.h"
+#include <TFile.h>
+#include <TTree.h>
+#include <TTreeReader.h>
+#include <TTreeReaderValue.h>
+#include <TTreeReaderArray.h>
+
 
 #include "Math/Functor.h"
 #include "Math/RootFinder.h"
@@ -36,6 +42,8 @@
 #include <limits>
 #include <exception>
 #include <algorithm>
+
+#include "event_CLASS.h"
 
 namespace {
 
@@ -131,51 +139,6 @@ struct RootResult {
 };
 
 
-
-// RootResult FindComplexZero_noDerivative(
-//     const std::vector<double>& e2_list,
-//     double x0_re,
-//     double x0_im
-// ) {
-//     ROOT::Math::GSLMultiRootFinder finder(
-//         ROOT::Math::GSLMultiRootFinder::kHybridS
-//     );
-// 
-//     ReMeanJ0 f_re(e2_list);
-//     ImMeanJ0 f_im(e2_list);
-// 
-//     finder.AddFunction(f_re, 2);
-//     finder.AddFunction(f_im, 2);
-// 
-//     double x0[2] = {x0_re, x0_im};
-// 
-//     auto t1 = std::chrono::high_resolution_clock::now();
-//     bool ok = finder.Solve(x0, 1000, 1e-10, 1e-10);
-//     auto t2 = std::chrono::high_resolution_clock::now();
-// 
-//     double time_ms =
-//         std::chrono::duration<double, std::milli>(t2 - t1).count();
-// 
-//     const double* root = finder.X();
-//     const double* fval = finder.FVal();
-// 
-//     RootResult result;
-// 
-//     result.ok = ok;
-//     result.status = finder.Status();
-//     result.time_ms = time_ms;
-// 
-//     if (root && fval) {
-//         result.k = {root[0], root[1]};
-//         result.F = {fval[0], fval[1]};
-//     } else {
-//         result.k = {NAN, NAN};
-//         result.F = {NAN, NAN};
-//     }
-// 
-//     return result;
-// }
-
 RootResult FindComplexZero_noDerivative(
     const std::vector<double>& e2_list,
     double x0_re,
@@ -226,55 +189,47 @@ RootResult FindComplexZero_noDerivative(
 
     return result;
 }
-
-void LYZ(const char* filename = "PbPb_central_411.dat")
+void LYZ(const char* filename = "PbPb_events.root")
 {
-    std::ifstream file(filename);
+    TFile file(filename, "READ");
 
-    if (!file.is_open()) {
-        std::cerr << "Error: cannot open file " << filename << std::endl;
+    if (file.IsZombie()) {
+        std::cerr << "Error: cannot open ROOT file "
+                  << filename << "\n";
         return;
     }
 
-    double id, b, npart, multi;
-    double ex2, ex3, ex4, ex5;
-    double ey2, ey3, ey4, ey5;
-    double r2, r3, r4, r5;
-
-    std::vector<double> e2_list;
-    e2_list.reserve(1000000);
-
-    std::string line;
+    
+	TTree* tree = nullptr;
+	file.GetObject("trento_events", tree);
 	
-	size_t max_events = 10000;
-	size_t counter = 0;
-    while (std::getline(file, line)) {
-        if (line.empty()) continue;
-        if (line[0] == '#') continue;
-		
-	 	counter ++;
-		if (counter == max_events) break;
-        
-		std::istringstream iss(line);
-
-        if (!(iss >> id >> b >> npart >> multi
-                  >> ex2 >> ex3 >> ex4 >> ex5
-                  >> ey2 >> ey3 >> ey4 >> ey5
-                  >> r2 >> r3 >> r4 >> r5)) {
-            continue;
-        }
-
-        const double e2 = std::sqrt(ex2 * ex2 + ey2 * ey2);
-        e2_list.push_back(e2);
-    }
-
-    std::cout << "Loaded " << e2_list.size() << " events\n";
+	event_CLASS* event = nullptr;
+	tree->SetBranchAddress("events", &event);
+	
+	std::vector<double> e2_list;
+	e2_list.reserve(tree->GetEntries());
+	
+	const std::size_t max_events = 10000;
+	const std::size_t nevents =
+	    std::min<std::size_t>(max_events, tree->GetEntries());
+	
+	for (std::size_t i = 0; i < nevents; ++i) {
+	    tree->GetEntry(i);
+	
+	    double ex2 = event->Get_epsilonx(2);
+	    double ey2 = event->Get_epsilony(2);
+	
+	    double e2 = std::sqrt(ex2 * ex2 + ey2 * ey2);
+	    e2_list.push_back(e2);
+	}
+	
+	std::cout << "Loaded " << e2_list.size()
+              << " events from ROOT file\n";
 
     if (e2_list.empty()) {
-        std::cerr << "No events were read. Check the input file format.\n";
+        std::cerr << "No events were read.\n";
         return;
     }
-
 
 
 	// Find complex zeros ---> Method does not need derivative
