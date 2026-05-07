@@ -26,7 +26,7 @@
 
 #include "complex_bessel.h"
 
- 
+#include "TRandom3.h"
 #include "RConfigure.h"
  
 #ifdef R__HAS_MATHMORE
@@ -395,9 +395,13 @@ void LYZ(const char* input_filename,
 	}
 	
 	
-	std::mt19937 rng(12345);
+	std::mt19937 rng(12345); 
 	std::uniform_int_distribution<int> dist(0, Nsub - 1);
+	// The seed must be change each time I run in different machines!
+	// Use TRandom3!
 	
+	TRandom3 rng(0);
+
 	std::vector<std::vector<RootResult>> roots_n2_from_resampling;
 	std::vector<std::vector<RootResult>> roots_n3_from_resampling;
 	std::vector<VnPowers> cumulants_n2_from_resampling;
@@ -411,9 +415,11 @@ void LYZ(const char* input_filename,
 	    	
 			e2_bootstrap.reserve(nevents);
 	    	for (int isub = 0; isub < Nsub; ++isub) {
-	    	    int pick = dist(rng);
-	
-	    	    e2_bootstrap.insert(
+	    	   
+				// int pick = dist(rng);
+				int pick = rng.Integer(Nsub);
+	    	    
+				e2_bootstrap.insert(
 	    	        e2_bootstrap.end(),
 	    	        subsamples_e2[pick].begin(),
 	    	        subsamples_e2[pick].end()
@@ -424,9 +430,11 @@ void LYZ(const char* input_filename,
 	    	
 			e3_bootstrap.reserve(nevents);
 	    	for (int isub = 0; isub < Nsub; ++isub) {
-	    	    int pick = dist(rng);
-	
-	    	    e3_bootstrap.insert(
+	    	    
+				// int pick = dist(rng);
+				int pick = rng.Integer(Nsub);
+	    	    
+				e3_bootstrap.insert(
 	    	        e3_bootstrap.end(),
 	    	        subsamples_e3[pick].begin(),
 	    	        subsamples_e3[pick].end()
