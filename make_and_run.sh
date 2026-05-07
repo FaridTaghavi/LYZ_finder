@@ -9,4 +9,7 @@ cd build
 make
 cd ..
 
-./build/LYZ "${1:-PbPb_central_4.dat}"
+INPUT_FILE="${1:-PbPb_events.root}"
+OUTPUT_FILE="${2:-bootstrap_roots.dat}"
+
+./build/LYZ "$INPUT_FILE" "$OUTPUT_FILE"

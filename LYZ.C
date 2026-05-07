@@ -47,7 +47,7 @@
 #include <algorithm>
 
 #include "event_CLASS.h"
-
+#include <filesystem>
 namespace {
 
 std::complex<double> J0_complex(const std::complex<double>& z)
@@ -193,40 +193,156 @@ RootResult FindComplexZero_noDerivative(
     return result;
 }
 
+struct LYZParameters {
+    double re_min = 30.0;
+    double re_max = 80.0;
+    double dre    = 15.0;
 
-void LYZ(const char* filename = "PbPb_events.root")
+    double im_min = 0.0;
+    double im_max = 30.0;
+    double dim    = 10.0;
+
+    int Nsub = 10;
+    int Nres = 500;
+
+    std::size_t max_events = 1000;
+
+    int ncore = 13;
+	
+	bool do_roots_n2 = true;
+    bool do_roots_n3 = false;
+
+    bool do_cumulants_n2 = true;
+    bool do_cumulants_n3 = false;
+};
+
+struct VnPowers {
+    double vn2to2;
+    double vn4to4;
+    double vn6to6;
+    double vn8to8;
+    double vn10to10;
+};
+
+struct averageV {
+	double n2;
+	double n4;
+	double n6;
+	double n8;
+	double n10;
+};
+
+averageV ComputeMoments(const std::vector<double>& e)
 {
-	
-	
-	// Searching the root in (ReZ, ImZ) plane
-	const double re_min {30.0};
-	const double re_max {80.0};
-	const double dre    {15.0};
-	const double im_min {0.0};
-	const double im_max {30};
-	const double dim    {10.0};
-    
-	const double max_found_root_size = 2 * std::sqrt( re_max * re_max + im_max * im_max ); // sometimes the rootfinder finds very big roots, we discard them. 
-	
-	// Bootstrap
-	const int Nsub = 10;  // Bootstrap subsample
-	const int Nres = 500; // Bootstrap resampling time
-	
-	// Be careful to remove it later!
-	const std::size_t max_events = 10000000;
-	
-	// Numebr of cores in searching for the roots
-	const int ncore = 13;
-	
-	
-	TFile file(filename, "READ");
+    averageV av{0.0, 0.0, 0.0, 0.0, 0.0};
 
-    if (file.IsZombie()) {
-        std::cerr << "Error: cannot open ROOT file "
-                  << filename << "\n";
-        return;
+    const double N = static_cast<double>(e.size());
+    if (N == 0.0) return av;
+
+    for (double x : e) {
+        double x2 = x * x;
+        double x4 = x2 * x2;
+        double x6 = x4 * x2;
+        double x8 = x4 * x4;
+        double x10 = x8 * x2;
+
+        av.n2  += x2;
+        av.n4  += x4;
+        av.n6  += x6;
+        av.n8  += x8;
+        av.n10 += x10;
     }
 
+    av.n2  /= N;
+    av.n4  /= N;
+    av.n6  /= N;
+    av.n8  /= N;
+    av.n10 /= N;
+
+    return av;
+}
+
+VnPowers ComputeVnPowers(averageV av ) {
+    
+	VnPowers out;
+
+    out.vn2to2 = av.n2;
+
+    out.vn4to4 = 2.0*std::pow(av.n2, 2.) - av.n4;
+
+    out.vn6to6 = (12.0*std::pow(av.n2, 3.) - 9. * av.n2*av.n4 + av.n6) /4.;
+
+    out.vn8to8 = (18.0*(8.0*std::pow(av.n2, 4.0) - 8.0*std::pow(av.n2, 2.0)*av.n4 + std::pow(av.n4,2.0)) + 16.0*av.n2*av.n6 - av.n8)/33.;
+    
+	out.vn10to10 = (av.n10 + 5.0*(576.0*std::pow(av.n2,5.0) - 720.0 * std::pow(av.n2,3.0)* av.n4 + 80.0*std::pow(av.n2,2.0)*av.n6 - 20.0 * av.n4*av.n6 + 5.0*av.n2*(36.0*std::pow(av.n4,2.0) - av.n8)))/456.;
+
+    return out;
+}
+
+bool IsGoodRoot(RootResult& r, double max_found_root_size)
+{
+    if (!r.ok) return false;
+    if (r.status != 0) return false;
+
+    if (!std::isfinite(r.k.real()) ||
+        !std::isfinite(r.k.imag())) return false;
+
+    if (std::abs(r.F) > 1e-8) return false;
+
+    const double axis_tol = 1e-8;
+
+    if (r.k.real() < -axis_tol) return false;
+    if (r.k.imag() < -axis_tol) return false;
+
+    if (std::abs(r.k.real()) < axis_tol)
+        r.k.real(0.0);
+
+    if (std::abs(r.k.imag()) < axis_tol)
+        r.k.imag(0.0);
+
+    if (std::abs(r.k) > max_found_root_size)
+        return false;
+
+    return true;
+}
+
+void LYZ(const char* input_filename,
+         const char* output_folder,
+         const LYZParameters& par)
+{
+	// Searching the root in (ReZ, ImZ) plane
+    const double re_min = par.re_min;
+    const double re_max = par.re_max;
+    const double dre    = par.dre;
+
+    const double im_min = par.im_min;
+    const double im_max = par.im_max;
+    const double dim    = par.dim;
+
+	// Bootstrap
+    const int Nsub = par.Nsub;
+    const int Nres = par.Nres;
+
+	const bool do_roots_n2 = par.do_roots_n2;
+	const bool do_roots_n3 = par.do_roots_n3;
+
+	const bool do_cumulants_n2 = par.do_cumulants_n2;
+	const bool do_cumulants_n3 = par.do_cumulants_n3;
+
+    const std::size_t max_events = par.max_events;
+
+	// Numebr of cores in searching for the roots
+    const int ncore = par.ncore;	
+	
+	const double max_found_root_size = 2 * std::sqrt( re_max * re_max + im_max * im_max ); // sometimes the rootfinder finds very big roots, we discard them. 
+	
+	TFile file(input_filename, "READ");
+	
+	if (file.IsZombie()) {
+	    std::cerr << "Error: cannot open ROOT file "
+	              << input_filename << "\n";
+	    return;
+	}
     
 	TTree* tree = nullptr;
 	file.GetObject("trento_events", tree);
@@ -244,51 +360,106 @@ void LYZ(const char* filename = "PbPb_events.root")
 	// e2_list.reserve(nevents);
 		
 
-	std::vector<std::vector<double>> subsamples(Nsub);
+	std::vector<std::vector<double>> subsamples_e2(Nsub);
+	std::vector<std::vector<double>> subsamples_e3(Nsub);
 
 
 	// Reading ttree and fill the subsample	
 	for (std::size_t i = 0; i < nevents; ++i) {
-	    tree->GetEntry(i);
+	   
+	   	tree->GetEntry(i);
 	
-	    double ex2 = event->Get_epsilonx(2);
-	    double ey2 = event->Get_epsilony(2);
+	    // double ex2 = event->Get_epsilonx(2);
+	    // double ey2 = event->Get_epsilony(2);
 	
-	    double e2 = std::sqrt(ex2 * ex2 + ey2 * ey2);
-	    
+	    // double e2 = std::sqrt(ex2 * ex2 + ey2 * ey2);
+		
+    	size_t isub = i % Nsub;
+		
+		if (do_roots_n2 || do_cumulants_n2) {
+		    double ex2 = event->Get_epsilonx(2);
+		    double ey2 = event->Get_epsilony(2);
+		    double e2 = std::sqrt(ex2 * ex2 + ey2 * ey2);
+    		subsamples_e2[isub].push_back(e2);
+		}
+		
+		if (do_roots_n3 || do_cumulants_n3) {
+		    double ex3 = event->Get_epsilonx(3);
+		    double ey3 = event->Get_epsilony(3);
+		    double e3 = std::sqrt(ex3 * ex3 + ey3 * ey3);
+    		subsamples_e3[isub].push_back(e3);
+		}
+
 		// e2_list.push_back(e2); //Not needed anymore!
 
-    	size_t isub = i % Nsub;
-    	subsamples[isub].push_back(e2);
 	}
 	
 	
 	std::mt19937 rng(12345);
 	std::uniform_int_distribution<int> dist(0, Nsub - 1);
 	
-	std::vector<std::vector<RootResult>> roots_from_resampling;
+	std::vector<std::vector<RootResult>> roots_n2_from_resampling;
+	std::vector<std::vector<RootResult>> roots_n3_from_resampling;
+	std::vector<VnPowers> cumulants_n2_from_resampling;
+	std::vector<VnPowers> cumulants_n3_from_resampling;
 	
 	for (int ires = 0; ires < Nres; ++ires) {
 	
-	    std::vector<double> e2_bootstrap;
-	    e2_bootstrap.reserve(nevents);
+	    std::vector<double> e2_bootstrap, e3_bootstrap;
 	
-	    for (int isub = 0; isub < Nsub; ++isub) {
-	        int pick = dist(rng);
+		if (do_roots_n2 || do_cumulants_n2) {
+	    	
+			e2_bootstrap.reserve(nevents);
+	    	for (int isub = 0; isub < Nsub; ++isub) {
+	    	    int pick = dist(rng);
 	
-	        e2_bootstrap.insert(
-	            e2_bootstrap.end(),
-	            subsamples[pick].begin(),
-	            subsamples[pick].end()
-	        );
-	    }
+	    	    e2_bootstrap.insert(
+	    	        e2_bootstrap.end(),
+	    	        subsamples_e2[pick].begin(),
+	    	        subsamples_e2[pick].end()
+	    	    );
+	    	}
+		}
+		if (do_roots_n3 || do_cumulants_n3) {
+	    	
+			e3_bootstrap.reserve(nevents);
+	    	for (int isub = 0; isub < Nsub; ++isub) {
+	    	    int pick = dist(rng);
+	
+	    	    e3_bootstrap.insert(
+	    	        e3_bootstrap.end(),
+	    	        subsamples_e3[pick].begin(),
+	    	        subsamples_e3[pick].end()
+	    	    );
+	    	}
+		}
 		std::cout << "----------------------------------\n";	
     	std::cout << "Bootstrap sample " << ires + 1
     	          << " out of " << Nres
     	          << " resampling.\n";	
 		std::cout << "----------------------------------\n";	
-	
-		std::vector<RootResult> roots;
+
+
+
+		// <<<<<<<<<<<<<<< Find Cumulants >>>>>>>>>>>>>>>>>>>
+		
+		
+		if (do_cumulants_n2) {
+		    averageV av2 = ComputeMoments(e2_bootstrap);
+		    VnPowers c2 = ComputeVnPowers(av2);
+		    cumulants_n2_from_resampling.push_back(c2);
+		}
+		
+		if (do_cumulants_n3) {
+		    averageV av3 = ComputeMoments(e3_bootstrap);
+		    VnPowers c3 = ComputeVnPowers(av3);
+		    cumulants_n3_from_resampling.push_back(c3);
+		}
+
+
+		// <<<<<<<<<<<<<<<  Find roots >>>>>>>>>>>>>>>
+
+		std::vector<RootResult> roots_n2, roots_n3;
 	
 	
 		int Nre = static_cast<int>((re_max - re_min) / dre);
@@ -298,195 +469,327 @@ void LYZ(const char* filename = "PbPb_events.root")
 		gsl_set_error_handler_off();
 		gErrorIgnoreLevel = kWarning;
 		gErrorIgnoreLevel = kFatal;	
+	
+		if (do_roots_n2 || do_roots_n3)
+		{	
+			omp_set_num_threads(ncore);
+			#pragma omp parallel
+			{
+			    std::vector<RootResult> local_n2_roots, local_n3_roots;
+			
+			    #pragma omp for schedule(dynamic)
+			    for (int ire = 0; ire <= Nre; ++ire) {
+			        
+					double re = re_min + ire * dre;
+			        #pragma omp critical
+			        {
+			            std::cout << "Real: " << re << "\n";
+			        }
+			        for (int iim = 0; iim <= Nim; ++iim) {
+			
+			            double im = im_min + iim * dim;
 		
-		omp_set_num_threads(ncore);
-		#pragma omp parallel
-		{
-		    std::vector<RootResult> local_roots;
-		
-		    #pragma omp for schedule(dynamic)
-		    for (int ire = 0; ire <= Nre; ++ire) {
-		        
-				double re = re_min + ire * dre;
-		        #pragma omp critical
-		        {
-		            std::cout << "Real: " << re << "\n";
-		        }
-		        for (int iim = 0; iim <= Nim; ++iim) {
-		
-		            double im = im_min + iim * dim;
-		
-		            RootResult r = FindComplexZero_noDerivative(e2_bootstrap, re, im);
-		
-					if (!r.ok) continue;
-					if (r.status != 0) continue;
-					if (!std::isfinite(r.k.real()) || !std::isfinite(r.k.imag())) continue;
-					if (std::abs(r.F) > 1e-8) continue;
+                		if (do_roots_n2) {
+                		    RootResult r2 =
+                		        FindComplexZero_noDerivative(e2_bootstrap, re, im);
 
-					const double axis_tol = 1e-8;
+                		    if (IsGoodRoot(r2, max_found_root_size)) {
+                		        local_n2_roots.push_back(r2);
+                		    }
+                		}
 
-					if (r.k.real() < -axis_tol) continue;
-					if (r.k.imag() < -axis_tol) continue;
-					
-					if (std::abs(r.k.real()) < axis_tol) r.k.real(0.0);
-					if (std::abs(r.k.imag()) < axis_tol) r.k.imag(0.0);
+                		if (do_roots_n3) {
+                		    RootResult r3 =
+                		        FindComplexZero_noDerivative(e3_bootstrap, re, im);
 
-					if (std::abs(r.k) > max_found_root_size)
-    					continue;
-		            local_roots.push_back(r);
-		
-		        }
-		    }
-		
-		    #pragma omp critical
-		    {
-		        roots.insert(roots.end(), local_roots.begin(), local_roots.end());
-		    }
-		}
+                		    if (IsGoodRoot(r3, max_found_root_size)) {
+                		        local_n3_roots.push_back(r3);
+                		    }
+                		}
 
-		std::vector<RootResult> unique_roots;
-		
-		const double tol = 1e-6;
-		
-		for (const auto& r : roots) {
-		
-		    bool duplicate = false;
-		
-		    for (const auto& u : unique_roots) {
-		
-		        if (std::abs(r.k - u.k) < tol) {
-		            duplicate = true;
-		            break;
-		        }
-		    }
-		
-		    if (!duplicate) {
-		        unique_roots.push_back(r);
-		    }
-		}
+			            // RootResult r = FindComplexZero_noDerivative(e2_bootstrap, re, im);
+			
+						// if (!r.ok) continue;
+						// if (r.status != 0) continue;
+						// if (!std::isfinite(r.k.real()) || !std::isfinite(r.k.imag())) continue;
+						// if (std::abs(r.F) > 1e-8) continue;
 
-		std::sort(
-		    unique_roots.begin(),
-		    unique_roots.end(),
-		    [](const RootResult& a, const RootResult& b) {
-		        return std::abs(a.k) < std::abs(b.k);
-		    }
-		);
-		roots_from_resampling.push_back(unique_roots);
+						// const double axis_tol = 1e-8;
+
+						// if (r.k.real() < -axis_tol) continue;
+						// if (r.k.imag() < -axis_tol) continue;
+						// 
+						// if (std::abs(r.k.real()) < axis_tol) r.k.real(0.0);
+						// if (std::abs(r.k.imag()) < axis_tol) r.k.imag(0.0);
+
+						// if (std::abs(r.k) > max_found_root_size)
+    					// 	continue;
+			            // local_roots.push_back(r);
+			
+			        }
+			    }
+			
+			    // #pragma omp critical
+			    // {
+			    //     roots.insert(roots.end(), local_roots.begin(), local_roots.end());
+			    // }
+				#pragma omp critical
+        		{
+        		    roots_n2.insert(
+        		        roots_n2.end(),
+        		        local_n2_roots.begin(),
+        		        local_n2_roots.end()
+        		    );
+
+        		    roots_n3.insert(
+        		        roots_n3.end(),
+        		        local_n3_roots.begin(),
+        		        local_n3_roots.end()
+        		    );
+        		}
+			}
+
+			const double tol = 1e-6;
+			
+			std::vector<RootResult> unique_roots_n2, unique_roots_n3;
+			
+			for (const auto& r : roots_n2) {
+			
+			    bool duplicate = false;
+			
+			    for (const auto& u : unique_roots_n2) {
+			
+			        if (std::abs(r.k - u.k) < tol) {
+			            duplicate = true;
+			            break;
+			        }
+			    }
+			
+			    if (!duplicate) {
+			        unique_roots_n2.push_back(r);
+			    }
+			}
+			for (const auto& r : roots_n3) {
+			
+				bool duplicate = false;
+			
+				for (const auto& u : unique_roots_n3) {
+			
+					if (std::abs(r.k - u.k) < tol) {
+						duplicate = true;
+						break;
+					}
+				}
+			
+				if (!duplicate) {
+					unique_roots_n3.push_back(r);
+				}
+			}
+
+			std::sort(
+			    unique_roots_n2.begin(),
+			    unique_roots_n2.end(),
+			    [](const RootResult& a, const RootResult& b) {
+			        return std::abs(a.k) < std::abs(b.k);
+			    }
+			);
+			if (do_roots_n2)
+				roots_n2_from_resampling.push_back(unique_roots_n2);
+			
+			std::sort(
+			    unique_roots_n3.begin(),
+			    unique_roots_n3.end(),
+			    [](const RootResult& a, const RootResult& b) {
+			        return std::abs(a.k) < std::abs(b.k);
+			    }
+			);
+			if (do_roots_n3)
+				roots_n3_from_resampling.push_back(unique_roots_n3);
+		};
 	}
 
 
-	// Write in a .dat file
-	std::ofstream out("bootstrap_roots.dat");
+    // Output file
+	//
+	//
+	std::filesystem::create_directories(output_folder);
+    
 	
-	if (!out.is_open()) {
-	    std::cerr << "Cannot open output file\n";
-	    return;
-	}
+	if (do_roots_n2) {
 	
-	out << "# ires  iroot  Re(k)  Im(k)  Re(F)  Im(F)\n";
+	    std::string filename_n2 =
+	        std::string(output_folder) + "/roots_n2.dat";
 	
-	for (std::size_t ires = 0;
-	     ires < roots_from_resampling.size();
-	     ++ires) {
+	    std::ofstream out_n2(filename_n2);
 	
-	    const auto& roots = roots_from_resampling[ires];
+	    if (!out_n2.is_open()) {
+	        std::cerr << "Cannot open " << filename_n2 << "\n";
+	        return;
+	    }
 	
-	    for (std::size_t iroot = 0;
-	         iroot < roots.size();
-	         ++iroot) {
+	    out_n2 << "# ires  iroot  Re(k)  Im(k)  Re(F)  Im(F)\n";
 	
-	        const auto& r = roots[iroot];
+	    for (std::size_t ires = 0;
+	         ires < roots_n2_from_resampling.size();
+	         ++ires) {
 	
-	        out
-	            << ires << " "
-	            << iroot << " "
-	            << r.k.real() << " "
-	            << r.k.imag() << " "
-	            << r.F.real() << " "
-	            << r.F.imag() << "\n";
+	        const auto& roots = roots_n2_from_resampling[ires];
+	
+	        for (std::size_t iroot = 0;
+	             iroot < roots.size();
+	             ++iroot) {
+	
+	            const auto& r = roots[iroot];
+	
+	            out_n2
+	                << ires << " "
+	                << iroot << " "
+	                << r.k.real() << " "
+	                << r.k.imag() << " "
+	                << r.F.real() << " "
+	                << r.F.imag() << "\n";
+	        }
+	    }
+	
+	    out_n2.close();
+	}	
+		
+		
+	if (do_roots_n3) {
+	
+	    std::string filename_n3 =
+	        std::string(output_folder) + "/roots_n3.dat";
+	
+	    std::ofstream out_n3(filename_n3);
+	
+	    if (!out_n3.is_open()) {
+	        std::cerr << "Cannot open " << filename_n3 << "\n";
+	        return;
+	    }
+	
+	    out_n3 << "# ires  iroot  Re(k)  Im(k)  Re(F)  Im(F)\n";
+	
+	    for (std::size_t ires = 0;
+	         ires < roots_n3_from_resampling.size();
+	         ++ires) {
+	
+	        const auto& roots = roots_n3_from_resampling[ires];
+	
+	        for (std::size_t iroot = 0;
+	             iroot < roots.size();
+	             ++iroot) {
+	
+	            const auto& r = roots[iroot];
+	
+	            out_n3
+	                << ires << " "
+	                << iroot << " "
+	                << r.k.real() << " "
+	                << r.k.imag() << " "
+	                << r.F.real() << " "
+	                << r.F.imag() << "\n";
+	        }
+	    }
+	
+	    out_n3.close();
+	}	
+
+
+	if (do_cumulants_n2) {
+	    std::ofstream out(std::string(output_folder) + "/cumulants_n2.dat");
+	
+	    out << "# ires  vn2to2  vn4to4  vn6to6  vn8to8  vn10to10\n";
+	
+	    for (std::size_t ires = 0; ires < cumulants_n2_from_resampling.size(); ++ires) {
+	        const auto& c = cumulants_n2_from_resampling[ires];
+	
+	        out << ires << " "
+	            << c.vn2to2 << " "
+	            << c.vn4to4 << " "
+	            << c.vn6to6 << " "
+	            << c.vn8to8 << " "
+	            << c.vn10to10 << "\n";
 	    }
 	}
 	
-	out.close();
+	if (do_cumulants_n3) {
+	    std::ofstream out(std::string(output_folder) + "/cumulants_n3.dat");
+	
+	    out << "# ires  vn2to2  vn4to4  vn6to6  vn8to8  vn10to10\n";
+	
+	    for (std::size_t ires = 0; ires < cumulants_n3_from_resampling.size(); ++ires) {
+	        const auto& c = cumulants_n3_from_resampling[ires];
+	
+	        out << ires << " "
+	            << c.vn2to2 << " "
+	            << c.vn4to4 << " "
+	            << c.vn6to6 << " "
+	            << c.vn8to8 << " "
+	            << c.vn10to10 << "\n";
+	    }
+	}
+	// std::ofstream out(output_filename);
+
+	// if (!out.is_open()) {
+	//     std::cerr << "Cannot open output file\n";
+	//     return;
+	// }
+	// 
+	// out << "# ires  iroot  Re(k)  Im(k)  Re(F)  Im(F)\n";
+	// 
+	// for (std::size_t ires = 0;
+	//      ires < roots_from_resampling.size();
+	//      ++ires) {
+	// 
+	//     const auto& roots = roots_from_resampling[ires];
+	// 
+	//     for (std::size_t iroot = 0;
+	//          iroot < roots.size();
+	//          ++iroot) {
+	// 
+	//         const auto& r = roots[iroot];
+	// 
+	//         out
+	//             << ires << " "
+	//             << iroot << " "
+	//             << r.k.real() << " "
+	//             << r.k.imag() << " "
+	//             << r.F.real() << " "
+	//             << r.F.imag() << "\n";
+	//     }
+	// }
+	// 
+	// out.close();
 
 	// Fill a 2D histogram
-	TH2D* h_roots = new TH2D(
-	    "h_roots",
-	    "Bootstrap roots;Re(k);Im(k)",
-	    200, 0, 0.7 * max_found_root_size,
-	    200, 0, 1.1 * im_max
-	);
-	
-	for (const auto& roots : roots_from_resampling) {
-	    for (const auto& r : roots) {
-	        h_roots->Fill(r.k.real(), r.k.imag());
-	    }
-	}
-
-
-	TFile outFile("bootstrap_roots_hist.root", "RECREATE");
-	h_roots->Write();
-	outFile.Close();
-
-	TCanvas* c = new TCanvas("c_roots", "Bootstrap roots", 800, 700);
-	h_roots->Draw("COLZ");
-	c->SaveAs("bootstrap_roots_hist.pdf");
-	
-	// std::cout << "Loaded " << e2_list.size()
-    //           << " events from ROOT file\n";
-
-    // if (e2_list.empty()) {
-    //     std::cerr << "No events were read.\n";
-    //     return;
-    // }
-
-
-	// Find complex zeros ---> Method does not need derivative
-
-
-	// RootResult r = FindComplexZero_noDerivative(e2_list, 50.0, 10.0);
+	// TH2D* h_roots = new TH2D(
+	//     "h_roots",
+	//     "Bootstrap roots;Re(k);Im(k)",
+	//     200, 0, 0.7 * max_found_root_size,
+	//     200, 0, 1.1 * im_max
+	// );
 	// 
-	// std::cout << "success = " << r.ok << "\n";
-	// std::cout << "status  = " << r.status << "\n";
-	// std::cout << "k = " << r.k.real() << " + i " << r.k.imag() << "\n";
-	// std::cout << "F(k) = " << r.F.real() << " , " << r.F.imag() << "\n";
-	// std::cout << "time = " << r.time_ms << " ms\n";
-
-
-
-	// for (double re = re_min; re <= re_max; re += dre) {
-	//     for (double im = im_min; im <= im_max; im += dim) {
-	// 
-	//         RootResult r = FindComplexZero_noDerivative(e2_list, re, im);
-	// 
-	//         if (!r.ok) continue;
-	// 
-	//         if (std::abs(r.F) > 1e-8) continue;
-	// 
-	//         roots.push_back(r);
-	// 		std::cout << "Real: " << re << ", Imeaginary: " << im << "\n";
+	// for (const auto& roots : roots_from_resampling) {
+	//     for (const auto& r : roots) {
+	//         h_roots->Fill(r.k.real(), r.k.imag());
 	//     }
 	// }
 
-	// Print ---
-	// for (const auto& r : unique_roots) {
+	// ---> Plot roots histograms
+	// -------------------------
 	// 
-	//     std::cout
-	//         << "k = "
-	//         << r.k.real()
-	//         << " + i "
-	//         << r.k.imag()
-	//         << "\n";
-	// 
-	//     // std::cout
-	//     //     << "F(k) = "
-	//     //     << r.F.real()
-	//     //     << " + i "
-	//     //     << r.F.imag()
-	//     //     << "\n";
-	// }
+	// TFile outFile("bootstrap_roots_hist.root", "RECREATE");
+	// h_roots->Write();
+	// outFile.Close();
+
+	// TCanvas* c = new TCanvas("c_roots", "Bootstrap roots", 800, 700);
+	// h_roots->Draw("COLZ");
+	// c->SaveAs("bootstrap_roots_hist.pdf");
 	
+	
+    // ---> Plot G(k)
+	//------------------
+	//
 	// TGraph* gr = new TGraph();
 
     // int point = 0;

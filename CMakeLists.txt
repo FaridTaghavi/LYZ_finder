@@ -12,6 +12,7 @@ add_subdirectory(complex_bessel)
 find_package(ROOT REQUIRED COMPONENTS Core Graf Gpad MathCore RIO Hist MathMore Tree TreePlayer)
 find_package(OpenMP REQUIRED)
 find_package(GSL REQUIRED)
+find_package(Boost REQUIRED COMPONENTS program_options)
 
 root_generate_dictionary(EventDict
     ${CMAKE_CURRENT_SOURCE_DIR}/event_CLASS.h
@@ -44,4 +45,5 @@ target_link_libraries(LYZ PRIVATE
     OpenMP::OpenMP_CXX
     GSL::gsl
     GSL::gslcblas
+    Boost::program_options
 )
