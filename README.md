@@ -1,6 +1,6 @@
-# LYZ project build notes
+# Finding Complex Lee-Yang zeros from TrENTo-generated data 
 
-The complex function is needed in this project. 
+To find the zeros, the complex Bessel function is required. 
 I have used the wrapper made by joeydumont in https://github.com/joeydumont/complex_bessel.
 
 
@@ -13,10 +13,4 @@ cd build
 cmake .. -DCMAKE_INSTALL_PREFIX=$HOME/local
 make
 make install
-```
-
-To install LYZ finder, in the same build folder:
-```bash
-cmake ..
-make
 ```
