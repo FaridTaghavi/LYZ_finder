@@ -18,15 +18,15 @@ OUTPUT_FOLDER="${2:-results}"
     --output "$OUTPUT_FOLDER" \
     --re-min 20 \
     --re-max 80 \
-    --dre 15 \
+    --dre 20 \
     --im-min 0 \
-    --im-max 30 \
+    --im-max 20 \
     --dim 10 \
-    --nsub 20 \
-    --nres 1000 \
-    --max-events 10000 \
-    --ncore 10\
-	--do-roots-n2 true\
-	--do-roots-n3 true\
-	--do-cumulants-n2 false\
+    --nsub 10 \
+    --nres 10 \
+    --max-events 1000 \
+    --ncore 10 \
+	--do-roots-n2 true \
+	--do-roots-n3 true \
+	--do-cumulants-n2 false \
 	--do-cumulants-n3 false
