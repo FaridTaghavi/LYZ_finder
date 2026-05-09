@@ -19,6 +19,7 @@ struct LYZParameters {
     std::size_t max_events = 1000;
 
     int ncore = 13;
+    unsigned int seed = 12345;
 	bool do_roots_n2 = true;
 	bool do_roots_n3 = false;
 	
@@ -106,6 +107,11 @@ int main(int argc, char* argv[])
                  ->default_value(par.ncore),
              "Number of OpenMP threads")
 
+            ("seed",
+             po::value<unsigned int>(&par.seed)
+                 ->default_value(par.seed),
+             "Base RNG seed; bootstrap sample i uses seed + i")
+	
 			("do-roots-n2",
 				 po::value<bool>(&par.do_roots_n2)
 				     ->default_value(par.do_roots_n2),

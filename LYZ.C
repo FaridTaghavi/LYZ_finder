@@ -342,7 +342,8 @@ struct LYZParameters {
     std::size_t max_events = 1000;
 
     int ncore = 13;
-	
+    unsigned int seed = 12345;
+		
 	bool do_roots_n2 = true;
     bool do_roots_n3 = false;
 
@@ -467,6 +468,7 @@ void LYZ(const char* input_filename,
 
 	// Numebr of cores in searching for the roots
     const int ncore = par.ncore;	
+    const unsigned int seed = par.seed;
 	
 	const double max_found_root_size = 2 * std::sqrt( re_max * re_max + im_max * im_max ); // sometimes the rootfinder finds very big roots, we discard them. 
 	
@@ -556,7 +558,7 @@ void LYZ(const char* input_filename,
 	omp_set_num_threads(ncore);
 	#pragma omp parallel for schedule(dynamic)
 	for (int ires = 0; ires < Nres; ++ires) {
-		TRandom3 rng(12345 + ires);
+		TRandom3 rng(seed + static_cast<unsigned int>(ires));
 	    std::vector<double> e2_bootstrap, e3_bootstrap;
 
 		if (do_roots_n2 || do_cumulants_n2) {
