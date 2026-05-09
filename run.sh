@@ -23,8 +23,8 @@ OUTPUT_FOLDER="${2:-results}"
     --im-max 20 \
     --dim 10 \
     --nsub 10 \
-    --nres 10 \
-    --max-events 1000 \
+    --nres 1000 \
+    --max-events 10000 \
     --ncore 10 \
 	--do-roots-n2 true \
 	--do-roots-n3 true \

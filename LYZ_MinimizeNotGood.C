@@ -538,27 +538,21 @@ void LYZ(const char* input_filename,
 	std::vector<std::vector<RootResult>> roots_n3_from_resampling;
 	std::vector<VnPowers> cumulants_n2_from_resampling;
 	std::vector<VnPowers> cumulants_n3_from_resampling;
-	
+
 	if (do_roots_n2) roots_n2_from_resampling.resize(Nres);
 	if (do_roots_n3) roots_n3_from_resampling.resize(Nres);
 	if (do_cumulants_n2) cumulants_n2_from_resampling.resize(Nres);
 	if (do_cumulants_n3) cumulants_n3_from_resampling.resize(Nres);
 
-	// Turn off the root finder warning info
-	gsl_set_error_handler_off();
-	gErrorIgnoreLevel = kWarning;
-	gErrorIgnoreLevel = kFatal;
-
-	int completed_bootstrap = 0;
-
-	std::cout << "0%\n";
-
 	omp_set_num_threads(ncore);
+
 	#pragma omp parallel for schedule(dynamic)
 	for (int ires = 0; ires < Nres; ++ires) {
-		TRandom3 rng(12345 + ires);
-	    std::vector<double> e2_bootstrap, e3_bootstrap;
 
+		TRandom3 rng(12345 + ires);
+	
+	    std::vector<double> e2_bootstrap, e3_bootstrap;
+	
 		if (do_roots_n2 || do_cumulants_n2) {
 	    	
 			e2_bootstrap.reserve(nevents);
@@ -589,6 +583,17 @@ void LYZ(const char* input_filename,
 	    	    );
 	    	}
 		}
+		#pragma omp critical(print_bootstrap)
+		{
+			std::cout << "----------------------------------\n";
+			std::cout << "Bootstrap sample " << ires + 1
+			          << " out of " << Nres
+			          << " resampling.\n";
+			std::cout << "----------------------------------\n";
+		}
+
+
+
 		// <<<<<<<<<<<<<<< Find Cumulants >>>>>>>>>>>>>>>>>>>
 		
 		
@@ -607,153 +612,171 @@ void LYZ(const char* input_filename,
 
 		// <<<<<<<<<<<<<<<  Find roots >>>>>>>>>>>>>>>
 
-		std::vector<RootResult> roots_n2, roots_n3;
-	
-	
-		int Nre = static_cast<int>((re_max - re_min) / dre);
-		int Nim = static_cast<int>((im_max - im_min) / dim);
-
-		if (do_roots_n2 || do_roots_n3)
-		{	
-		    for (int ire = 0; ire <= Nre; ++ire) {
-			        
-				double re = re_min + ire * dre;
-		        for (int iim = 0; iim <= Nim; ++iim) {
-			
-		            double im = im_min + iim * dim;
-		
-            		if (do_roots_n2) {
-            		    RootResult r2 =
-            		        FindComplexZero_noDerivative(e2_bootstrap, re, im);
-
-            		    if (IsGoodRoot(r2, max_found_root_size)) {
-            		        roots_n2.push_back(r2);
-            		    }
-            		}
-
-            		if (do_roots_n3) {
-            		    RootResult r3 =
-            		        FindComplexZero_noDerivative(e3_bootstrap, re, im);
-
-            		    if (IsGoodRoot(r3, max_found_root_size)) {
-            		        roots_n3.push_back(r3);
-            		    }
-            		}
-
-			            // RootResult r = FindComplexZero_noDerivative(e2_bootstrap, re, im);
-			
-						// if (!r.ok) continue;
-						// if (r.status != 0) continue;
-						// if (!std::isfinite(r.k.real()) || !std::isfinite(r.k.imag())) continue;
-						// if (std::abs(r.F) > 1e-8) continue;
-
-						// const double axis_tol = 1e-8;
-
-						// if (r.k.real() < -axis_tol) continue;
-						// if (r.k.imag() < -axis_tol) continue;
-						// 
-						// if (std::abs(r.k.real()) < axis_tol) r.k.real(0.0);
-						// if (std::abs(r.k.imag()) < axis_tol) r.k.imag(0.0);
-
-						// if (std::abs(r.k) > max_found_root_size)
-    					// 	continue;
-			            // local_roots.push_back(r);
-			
-		        }
-			}
-		}
-//			std::vector<RootResult> roots_n2, roots_n3;
-//			
-//			int Nre = static_cast<int>((re_max - re_min) / dre);
-//			int Nim = static_cast<int>((im_max - im_min) / dim);
-//			
-//			// Turn off warnings
-//			gsl_set_error_handler_off();
-//			gErrorIgnoreLevel = kFatal;
-//			
-//			if (do_roots_n2 || do_roots_n3)
+//		std::vector<RootResult> roots_n2, roots_n3;
+//	
+//	
+//		int Nre = static_cast<int>((re_max - re_min) / dre);
+//		int Nim = static_cast<int>((im_max - im_min) / dim);
+//
+//		// Turn off the root finder warning info
+//		gsl_set_error_handler_off();
+//		gErrorIgnoreLevel = kWarning;
+//		gErrorIgnoreLevel = kFatal;	
+//	
+//		if (do_roots_n2 || do_roots_n3)
+//		{	
+//			omp_set_num_threads(ncore);
+//			#pragma omp parallel
 //			{
-//			    omp_set_num_threads(ncore);
+//			    std::vector<RootResult> local_n2_roots, local_n3_roots;
 //			
-//			    #pragma omp parallel
-//			    {
-//			        std::vector<RootResult> local_n2_roots;
-//			        std::vector<RootResult> local_n3_roots;
-//			
-//			        #pragma omp for schedule(dynamic)
-//			        for (int ire = 0; ire < Nre; ++ire) {
-//			
-//			            double re_left  = re_min + ire * dre;
-//			            double re_right = re_min + (ire + 1) * dre;
-//			
-//			            double re_center = 0.5 * (re_left + re_right);
-//			
-//			            #pragma omp critical
-//			            {
-//			                std::cout << "Real block center: " << re_center << "\n";
-//			            }
-//			
-//			            for (int iim = 0; iim < Nim; ++iim) {
-//			
-//			                double im_left  = im_min + iim * dim;
-//			                double im_right = im_min + (iim + 1) * dim;
-//			
-//			                double im_center = 0.5 * (im_left + im_right);
-//			
-//			                if (do_roots_n2) {
-//			
-//			                    RootResult r2 =
-//			                        FindComplexZero_minimize_absF2(
-//			                            e2_bootstrap,
-//			                            re_center,
-//			                            im_center,
-//			                            re_left,
-//			                            re_right,
-//			                            im_left,
-//			                            im_right
-//			                        );
-//			
-//			                    if (IsGoodRoot(r2, max_found_root_size)) {
-//			                        local_n2_roots.push_back(r2);
-//			                    }
-//			                }
-//			
-//			                if (do_roots_n3) {
-//			
-//			                    RootResult r3 =
-//			                        FindComplexZero_minimize_absF2(
-//			                            e3_bootstrap,
-//			                            re_center,
-//			                            im_center,
-//			                            re_left,
-//			                            re_right,
-//			                            im_left,
-//			                            im_right
-//			                        );
-//			
-//			                    if (IsGoodRoot(r3, max_found_root_size)) {
-//			                        local_n3_roots.push_back(r3);
-//			                    }
-//			                }
-//			            }
-//			        }
-//			
+//			    #pragma omp for schedule(dynamic)
+//			    for (int ire = 0; ire <= Nre; ++ire) {
+//			        
+//					double re = re_min + ire * dre;
 //			        #pragma omp critical
 //			        {
-//			            roots_n2.insert(
-//			                roots_n2.end(),
-//			                local_n2_roots.begin(),
-//			                local_n2_roots.end()
-//			            );
+//			            std::cout << "Real: " << re << "\n";
+//			        }
+//			        for (int iim = 0; iim <= Nim; ++iim) {
 //			
-//			            roots_n3.insert(
-//			                roots_n3.end(),
-//			                local_n3_roots.begin(),
-//			                local_n3_roots.end()
-//			            );
+//			            double im = im_min + iim * dim;
+//		
+//                		if (do_roots_n2) {
+//                		    RootResult r2 =
+//                		        FindComplexZero_noDerivative(e2_bootstrap, re, im);
+//
+//                		    if (IsGoodRoot(r2, max_found_root_size)) {
+//                		        local_n2_roots.push_back(r2);
+//                		    }
+//                		}
+//
+//                		if (do_roots_n3) {
+//                		    RootResult r3 =
+//                		        FindComplexZero_noDerivative(e3_bootstrap, re, im);
+//
+//                		    if (IsGoodRoot(r3, max_found_root_size)) {
+//                		        local_n3_roots.push_back(r3);
+//                		    }
+//                		}
+//
+//			            // RootResult r = FindComplexZero_noDerivative(e2_bootstrap, re, im);
+//			
+//						// if (!r.ok) continue;
+//						// if (r.status != 0) continue;
+//						// if (!std::isfinite(r.k.real()) || !std::isfinite(r.k.imag())) continue;
+//						// if (std::abs(r.F) > 1e-8) continue;
+//
+//						// const double axis_tol = 1e-8;
+//
+//						// if (r.k.real() < -axis_tol) continue;
+//						// if (r.k.imag() < -axis_tol) continue;
+//						// 
+//						// if (std::abs(r.k.real()) < axis_tol) r.k.real(0.0);
+//						// if (std::abs(r.k.imag()) < axis_tol) r.k.imag(0.0);
+//
+//						// if (std::abs(r.k) > max_found_root_size)
+//    					// 	continue;
+//			            // local_roots.push_back(r);
+//			
 //			        }
 //			    }
+//			
+//			    // #pragma omp critical
+//			    // {
+//			    //     roots.insert(roots.end(), local_roots.begin(), local_roots.end());
+//			    // }
+//				#pragma omp critical
+//        		{
+//        		    roots_n2.insert(
+//        		        roots_n2.end(),
+//        		        local_n2_roots.begin(),
+//        		        local_n2_roots.end()
+//        		    );
+//
+//        		    roots_n3.insert(
+//        		        roots_n3.end(),
+//        		        local_n3_roots.begin(),
+//        		        local_n3_roots.end()
+//        		    );
+//        		}
 //			}
+
+			std::vector<RootResult> roots_n2, roots_n3;
+			
+			int Nre = static_cast<int>(std::ceil((re_max - re_min) / dre));
+			int Nim = static_cast<int>(std::ceil((im_max - im_min) / dim));
+			
+			// Turn off warnings
+			gsl_set_error_handler_off();
+			gErrorIgnoreLevel = kFatal;
+			
+			if (do_roots_n2 || do_roots_n3)
+			{
+				for (int ire = 0; ire < Nre; ++ire) {
+					double re_left  = re_min + ire * dre;
+					double re_right = std::min(re_min + (ire + 1) * dre, re_max);
+					double re_center = 0.5 * (re_left + re_right);
+
+					// #pragma omp critical(print_re_block)
+					// {
+					// 	std::cout << "Bootstrap " << ires + 1
+					// 	          << ", real block center: " << re_center << "\n";
+					// }
+				
+					for (int iim = 0; iim < Nim; ++iim) {
+						double im_left  = im_min + iim * dim;
+						double im_right = std::min(im_min + (iim + 1) * dim, im_max);
+						double im_center = 0.5 * (im_left + im_right);
+				
+						if (do_roots_n2) {
+							RootResult r2 =
+								FindComplexZero_minimize_absF2(
+									e2_bootstrap,
+									re_center,
+									im_center,
+									re_left,
+									re_right,
+									im_left,
+									im_right
+								);
+				double absF2 = std::abs(r2.F);
+
+#pragma omp critical(print_candidate)
+{
+    std::cout
+        << "n2 candidate: "
+        << "k = " << r2.k
+        << " F = " << r2.F
+        << " |F| = " << absF2
+        << " ok = " << r2.ok
+        << " status = " << r2.status
+        << "\n";
+}
+							if (IsGoodRoot(r2, max_found_root_size)) {
+								roots_n2.push_back(r2);
+							}
+						}
+				
+						if (do_roots_n3) {
+							RootResult r3 =
+								FindComplexZero_minimize_absF2(
+									e3_bootstrap,
+									re_center,
+									im_center,
+									re_left,
+									re_right,
+									im_left,
+									im_right
+								);
+				
+							if (IsGoodRoot(r3, max_found_root_size)) {
+								roots_n3.push_back(r3);
+							}
+						}
+					}
+				}
+			}
 
 			const double tol = 1e-6;
 			
@@ -809,21 +832,9 @@ void LYZ(const char* input_filename,
 			        return std::abs(a.k) < std::abs(b.k);
 			    }
 			);
-				if (do_roots_n3)
-					roots_n3_from_resampling[ires] = unique_roots_n3;
-
-			int done = 0;
-			#pragma omp atomic capture
-			done = ++completed_bootstrap;
-
-			const double percent =
-			    100.0 * static_cast<double>(done) / static_cast<double>(Nres);
-
-			#pragma omp critical(print_progress)
-			{
-				std::cout << percent << "%\n";
-			}
-		}
+			if (do_roots_n3)
+				roots_n3_from_resampling[ires] = unique_roots_n3;
+	}
 
 
     // Output file

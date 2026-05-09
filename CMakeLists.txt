@@ -16,6 +16,7 @@ find_package(Boost REQUIRED COMPONENTS program_options)
 
 root_generate_dictionary(EventDict
     ${CMAKE_CURRENT_SOURCE_DIR}/event_CLASS.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/events_info_CLASS.h
     LINKDEF ${CMAKE_CURRENT_SOURCE_DIR}/LinkDef.h
 )
 
@@ -23,6 +24,7 @@ add_executable(LYZ
     main.cpp
     LYZ.C
     event_CLASS.cpp
+    events_info_CLASS.cpp
     EventDict.cxx
 )
 
