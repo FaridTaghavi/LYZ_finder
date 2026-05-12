@@ -103,6 +103,21 @@ void MeanJ0_complex(std::complex<double> k,
     }
 
     result = (N > 0) ? sum / static_cast<double>(N)
+	                     : std::complex<double>(0.0, 0.0);
+}
+
+void MeanJ0_derivative_complex(std::complex<double> k,
+                               const std::vector<double>& e2_vals,
+                               std::complex<double>& result)
+{
+    std::complex<double> sum{0.0, 0.0};
+    const std::size_t N = e2_vals.size();
+
+    for (double e2 : e2_vals) {
+        sum += -e2 * J1_complex(k * e2);
+    }
+
+    result = (N > 0) ? sum / static_cast<double>(N)
                      : std::complex<double>(0.0, 0.0);
 }
 
@@ -134,6 +149,72 @@ struct ImMeanJ0 {
         MeanJ0_complex(k, e2_vals, result);
         return result.imag(); 
     }
+	};
+
+class ReMeanJ0Grad : public ROOT::Math::IGradientFunctionMultiDim {
+public:
+    explicit ReMeanJ0Grad(const std::vector<double>& e2)
+        : e2_vals(e2) {}
+
+    unsigned int NDim() const override { return 2; }
+
+    ROOT::Math::IBaseFunctionMultiDim* Clone() const override {
+        return new ReMeanJ0Grad(*this);
+    }
+
+private:
+    double DoEval(const double* x) const override {
+        std::complex<double> k{x[0], x[1]};
+        std::complex<double> val;
+        MeanJ0_complex(k, e2_vals, val);
+        return val.real();
+    }
+
+    double DoDerivative(const double* x, unsigned int icoord) const override {
+        std::complex<double> k{x[0], x[1]};
+        std::complex<double> dfdk;
+        MeanJ0_derivative_complex(k, e2_vals, dfdk);
+
+        double a = dfdk.real();
+        double b = dfdk.imag();
+
+        return (icoord == 0) ? a : -b;
+    }
+
+    const std::vector<double>& e2_vals;
+};
+
+class ImMeanJ0Grad : public ROOT::Math::IGradientFunctionMultiDim {
+public:
+    explicit ImMeanJ0Grad(const std::vector<double>& e2)
+        : e2_vals(e2) {}
+
+    unsigned int NDim() const override { return 2; }
+
+    ROOT::Math::IBaseFunctionMultiDim* Clone() const override {
+        return new ImMeanJ0Grad(*this);
+    }
+
+private:
+    double DoEval(const double* x) const override {
+        std::complex<double> k{x[0], x[1]};
+        std::complex<double> val;
+        MeanJ0_complex(k, e2_vals, val);
+        return val.imag();
+    }
+
+    double DoDerivative(const double* x, unsigned int icoord) const override {
+        std::complex<double> k{x[0], x[1]};
+        std::complex<double> dfdk;
+        MeanJ0_derivative_complex(k, e2_vals, dfdk);
+
+        double a = dfdk.real();
+        double b = dfdk.imag();
+
+        return (icoord == 0) ? b : a;
+    }
+
+    const std::vector<double>& e2_vals;
 };
 
 struct RootResult {
@@ -148,7 +229,9 @@ struct RootResult {
 RootResult FindComplexZero_noDerivative(
     const std::vector<double>& e2_list,
     double x0_re,
-    double x0_im
+    double x0_im,
+    ROOT::Math::GSLMultiRootFinder::EType algorithm =
+        ROOT::Math::GSLMultiRootFinder::kHybridS
 ) {
     RootResult result;
     result.ok = false;
@@ -158,9 +241,7 @@ RootResult FindComplexZero_noDerivative(
     result.time_ms = 0.0;
 
     try {
-        ROOT::Math::GSLMultiRootFinder finder(
-            ROOT::Math::GSLMultiRootFinder::kHybridS
-        );
+        ROOT::Math::GSLMultiRootFinder finder(algorithm);
 
         ReMeanJ0 f_re(e2_list);
         ImMeanJ0 f_im(e2_list);
@@ -196,18 +277,12 @@ RootResult FindComplexZero_noDerivative(
     return result;
 }
 
-
-RootResult FindComplexZero_minimize_absF2(
+RootResult FindComplexZero_withJacobian(
     const std::vector<double>& e2_list,
     double x0_re,
-    double x0_im,
-    double xmin_re,
-    double xmax_re,
-    double xmin_im,
-    double xmax_im
+    double x0_im
 ) {
     RootResult result;
-
     result.ok = false;
     result.status = -999;
     result.k = {NAN, NAN};
@@ -215,110 +290,37 @@ RootResult FindComplexZero_minimize_absF2(
     result.time_ms = 0.0;
 
     try {
-
-        ReMeanJ0 f_re(e2_list);
-        ImMeanJ0 f_im(e2_list);
-
-        // Minimize |F(k)|^2
-        auto objective = [&](const double* x) {
-
-            double p[2] = {x[0], x[1]};
-
-            double fre = f_re(p);
-            double fim = f_im(p);
-
-            return fre * fre + fim * fim;
-        };
-
-        std::unique_ptr<ROOT::Math::Minimizer> minimizer(
-            ROOT::Math::Factory::CreateMinimizer(
-                "Minuit2",
-                "Migrad"
-            )
+        ROOT::Math::GSLMultiRootFinder finder(
+            ROOT::Math::GSLMultiRootFinder::kHybridSJ
         );
 
-        if (!minimizer) {
-            result.status = -998;
-            return result;
-        }
+        ReMeanJ0Grad f_re(e2_list);
+        ImMeanJ0Grad f_im(e2_list);
 
-        minimizer->SetMaxFunctionCalls(10000);
-        minimizer->SetMaxIterations(10000);
+        finder.AddFunction(f_re);
+        finder.AddFunction(f_im);
 
-        minimizer->SetTolerance(1e-12);
+        double x0[2] = {x0_re, x0_im};
 
-        minimizer->SetPrintLevel(0);
-
-        ROOT::Math::Functor func(objective, 2);
-
-        minimizer->SetFunction(func);
-
-        double step_re =
-            0.01 * (xmax_re - xmin_re);
-
-        double step_im =
-            0.01 * (xmax_im - xmin_im);
-
-        if (step_re <= 0.0 || step_im <= 0.0) {
-
-            result.status = -997;
-            return result;
-        }
-
-        minimizer->SetLimitedVariable(
-            0,
-            "k_re",
-            x0_re,
-            step_re,
-            xmin_re,
-            xmax_re
-        );
-
-        minimizer->SetLimitedVariable(
-            1,
-            "k_im",
-            x0_im,
-            step_im,
-            xmin_im,
-            xmax_im
-        );
-
-        auto t1 =
-            std::chrono::high_resolution_clock::now();
-
-        bool ok = minimizer->Minimize();
-
-        auto t2 =
-            std::chrono::high_resolution_clock::now();
+        auto t1 = std::chrono::high_resolution_clock::now();
+        bool ok = finder.Solve(x0, 1000, 1e-10, 1e-10);
+        auto t2 = std::chrono::high_resolution_clock::now();
 
         result.time_ms =
-            std::chrono::duration<double, std::milli>(
-                t2 - t1
-            ).count();
+            std::chrono::duration<double, std::milli>(t2 - t1).count();
 
-        result.status = minimizer->Status();
+        const double* root = finder.X();
+        const double* fval = finder.FVal();
 
-        const double* root = minimizer->X();
+        result.ok = ok;
+        result.status = finder.Status();
 
-        if (root) {
-
-            double p[2] = {root[0], root[1]};
-
-            double fre = f_re(p);
-            double fim = f_im(p);
-
+        if (root && fval) {
             result.k = {root[0], root[1]};
-
-            result.F = {fre, fim};
-
-            double absF = std::hypot(fre, fim);
-
-            result.ok =
-                ok && (absF < 1e-6);
+            result.F = {fval[0], fval[1]};
         }
     }
     catch (const std::exception& e) {
-
         result.ok = false;
         result.status = -999;
     }
@@ -343,7 +345,9 @@ struct LYZParameters {
 
     int ncore = 13;
     unsigned int seed = 12345;
-		
+    std::string root_algorithm = "hybridS";
+    std::vector<std::pair<double, double>> root_start_points;
+				
 	bool do_roots_n2 = true;
     bool do_roots_n3 = false;
 
@@ -441,6 +445,60 @@ bool IsGoodRoot(RootResult& r, double max_found_root_size)
     return true;
 }
 
+std::vector<std::pair<double, double>> BuildRootStartPoints(
+    const LYZParameters& par
+)
+{
+    if (!par.root_start_points.empty()) {
+        return par.root_start_points;
+    }
+
+    std::vector<std::pair<double, double>> points;
+
+    int Nre = static_cast<int>((par.re_max - par.re_min) / par.dre);
+    int Nim = static_cast<int>((par.im_max - par.im_min) / par.dim);
+
+    for (int ire = 0; ire <= Nre; ++ire) {
+        double re = par.re_min + ire * par.dre;
+
+        for (int iim = 0; iim <= Nim; ++iim) {
+            double im = par.im_min + iim * par.dim;
+            points.emplace_back(re, im);
+        }
+    }
+
+    return points;
+}
+
+double MaxRootSearchRadius(
+    const std::vector<std::pair<double, double>>& root_start_points,
+    double re_max,
+    double im_max
+)
+{
+    double max_radius = std::sqrt(re_max * re_max + im_max * im_max);
+
+    for (const auto& p : root_start_points) {
+        max_radius = std::max(
+            max_radius,
+            std::sqrt(p.first * p.first + p.second * p.second)
+        );
+    }
+
+    return max_radius;
+}
+
+ROOT::Math::GSLMultiRootFinder::EType ParseRootAlgorithm(
+    const std::string& root_algorithm
+)
+{
+    if (root_algorithm == "hybrid") {
+        return ROOT::Math::GSLMultiRootFinder::kHybrid;
+    }
+
+    return ROOT::Math::GSLMultiRootFinder::kHybridS;
+}
+
 void LYZ(const char* input_filename,
          const char* output_folder,
          const LYZParameters& par)
@@ -467,10 +525,14 @@ void LYZ(const char* input_filename,
     const std::size_t max_events = par.max_events;
 
 	// Numebr of cores in searching for the roots
-    const int ncore = par.ncore;	
-    const unsigned int seed = par.seed;
+	    const int ncore = par.ncore;
+	    const unsigned int seed = par.seed;
+	    const std::string root_algorithm = par.root_algorithm;
+	    const auto root_finder_algorithm = ParseRootAlgorithm(root_algorithm);
+        const auto root_start_points = BuildRootStartPoints(par);
 	
-	const double max_found_root_size = 2 * std::sqrt( re_max * re_max + im_max * im_max ); // sometimes the rootfinder finds very big roots, we discard them. 
+	const double max_found_root_size =
+        2 * MaxRootSearchRadius(root_start_points, re_max, im_max); // sometimes the rootfinder finds very big roots, we discard them. 
 	
 	TFile file(input_filename, "READ");
 	
@@ -612,35 +674,43 @@ void LYZ(const char* input_filename,
 		std::vector<RootResult> roots_n2, roots_n3;
 	
 	
-		int Nre = static_cast<int>((re_max - re_min) / dre);
-		int Nim = static_cast<int>((im_max - im_min) / dim);
-
 		if (do_roots_n2 || do_roots_n3)
-		{	
-		    for (int ire = 0; ire <= Nre; ++ire) {
-			        
-				double re = re_min + ire * dre;
-		        for (int iim = 0; iim <= Nim; ++iim) {
-			
-		            double im = im_min + iim * dim;
-		
-            		if (do_roots_n2) {
-            		    RootResult r2 =
-            		        FindComplexZero_noDerivative(e2_bootstrap, re, im);
+		{
+		    for (const auto& start_point : root_start_points) {
+                double re = start_point.first;
+                double im = start_point.second;
 
-            		    if (IsGoodRoot(r2, max_found_root_size)) {
-            		        roots_n2.push_back(r2);
-            		    }
-            		}
+	            		if (do_roots_n2) {
+	            		    RootResult r2 =
+	            		        (root_algorithm == "hybridSJ")
+	            		            ? FindComplexZero_withJacobian(e2_bootstrap, re, im)
+	            		            : FindComplexZero_noDerivative(
+	            		                  e2_bootstrap,
+	            		                  re,
+	            		                  im,
+	            		                  root_finder_algorithm
+	            		              );
 
-            		if (do_roots_n3) {
-            		    RootResult r3 =
-            		        FindComplexZero_noDerivative(e3_bootstrap, re, im);
+	            		    if (IsGoodRoot(r2, max_found_root_size)) {
+	            		        roots_n2.push_back(r2);
+	            		    }
+		            		}
 
-            		    if (IsGoodRoot(r3, max_found_root_size)) {
-            		        roots_n3.push_back(r3);
-            		    }
-            		}
+	            		if (do_roots_n3) {
+	            		    RootResult r3 =
+	            		        (root_algorithm == "hybridSJ")
+	            		            ? FindComplexZero_withJacobian(e3_bootstrap, re, im)
+	            		            : FindComplexZero_noDerivative(
+	            		                  e3_bootstrap,
+	            		                  re,
+	            		                  im,
+	            		                  root_finder_algorithm
+	            		              );
+
+	            		    if (IsGoodRoot(r3, max_found_root_size)) {
+	            		        roots_n3.push_back(r3);
+	            		    }
+	            		}
 
 			            // RootResult r = FindComplexZero_noDerivative(e2_bootstrap, re, im);
 			
@@ -661,102 +731,8 @@ void LYZ(const char* input_filename,
     					// 	continue;
 			            // local_roots.push_back(r);
 			
-		        }
 			}
 		}
-//			std::vector<RootResult> roots_n2, roots_n3;
-//			
-//			int Nre = static_cast<int>((re_max - re_min) / dre);
-//			int Nim = static_cast<int>((im_max - im_min) / dim);
-//			
-//			// Turn off warnings
-//			gsl_set_error_handler_off();
-//			gErrorIgnoreLevel = kFatal;
-//			
-//			if (do_roots_n2 || do_roots_n3)
-//			{
-//			    omp_set_num_threads(ncore);
-//			
-//			    #pragma omp parallel
-//			    {
-//			        std::vector<RootResult> local_n2_roots;
-//			        std::vector<RootResult> local_n3_roots;
-//			
-//			        #pragma omp for schedule(dynamic)
-//			        for (int ire = 0; ire < Nre; ++ire) {
-//			
-//			            double re_left  = re_min + ire * dre;
-//			            double re_right = re_min + (ire + 1) * dre;
-//			
-//			            double re_center = 0.5 * (re_left + re_right);
-//			
-//			            #pragma omp critical
-//			            {
-//			                std::cout << "Real block center: " << re_center << "\n";
-//			            }
-//			
-//			            for (int iim = 0; iim < Nim; ++iim) {
-//			
-//			                double im_left  = im_min + iim * dim;
-//			                double im_right = im_min + (iim + 1) * dim;
-//			
-//			                double im_center = 0.5 * (im_left + im_right);
-//			
-//			                if (do_roots_n2) {
-//			
-//			                    RootResult r2 =
-//			                        FindComplexZero_minimize_absF2(
-//			                            e2_bootstrap,
-//			                            re_center,
-//			                            im_center,
-//			                            re_left,
-//			                            re_right,
-//			                            im_left,
-//			                            im_right
-//			                        );
-//			
-//			                    if (IsGoodRoot(r2, max_found_root_size)) {
-//			                        local_n2_roots.push_back(r2);
-//			                    }
-//			                }
-//			
-//			                if (do_roots_n3) {
-//			
-//			                    RootResult r3 =
-//			                        FindComplexZero_minimize_absF2(
-//			                            e3_bootstrap,
-//			                            re_center,
-//			                            im_center,
-//			                            re_left,
-//			                            re_right,
-//			                            im_left,
-//			                            im_right
-//			                        );
-//			
-//			                    if (IsGoodRoot(r3, max_found_root_size)) {
-//			                        local_n3_roots.push_back(r3);
-//			                    }
-//			                }
-//			            }
-//			        }
-//			
-//			        #pragma omp critical
-//			        {
-//			            roots_n2.insert(
-//			                roots_n2.end(),
-//			                local_n2_roots.begin(),
-//			                local_n2_roots.end()
-//			            );
-//			
-//			            roots_n3.insert(
-//			                roots_n3.end(),
-//			                local_n3_roots.begin(),
-//			                local_n3_roots.end()
-//			            );
-//			        }
-//			    }
-//			}
-
 			const double tol = 1e-6;
 			
 			std::vector<RootResult> unique_roots_n2, unique_roots_n3;

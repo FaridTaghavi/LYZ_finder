@@ -1,5 +1,10 @@
 #include <boost/program_options.hpp>
 #include <iostream>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace po = boost::program_options;
 
@@ -20,6 +25,8 @@ struct LYZParameters {
 
     int ncore = 13;
     unsigned int seed = 12345;
+    std::string root_algorithm = "hybridS";
+    std::vector<std::pair<double, double>> root_start_points;
 	bool do_roots_n2 = true;
 	bool do_roots_n3 = false;
 	
@@ -32,6 +39,38 @@ void LYZ(const char* input_filename,
          const char* output_filename,
          const LYZParameters& par);
 
+std::pair<double, double> ParseRootStartPoint(const std::string& text)
+{
+    std::string normalized = text;
+    for (char& c : normalized) {
+        if (c == ':' || c == ';') {
+            c = ',';
+        }
+    }
+
+    std::stringstream ss(normalized);
+    std::string re_text;
+    std::string im_text;
+
+    if (!std::getline(ss, re_text, ',') ||
+        !std::getline(ss, im_text, ',') ||
+        re_text.empty() ||
+        im_text.empty()) {
+        throw std::runtime_error(
+            "Invalid --root-start-point '" + text + "'. Use Re,Im, for example 40,5."
+        );
+    }
+
+    std::string extra;
+    if (std::getline(ss, extra, ',')) {
+        throw std::runtime_error(
+            "Invalid --root-start-point '" + text + "'. Use exactly two values."
+        );
+    }
+
+    return {std::stod(re_text), std::stod(im_text)};
+}
+
 int main(int argc, char* argv[])
 {
     try {
@@ -40,6 +79,7 @@ int main(int argc, char* argv[])
         std::string output_file;
 
         LYZParameters par;
+        std::vector<std::string> root_start_point_args;
 
         po::options_description desc("LYZ options");
 
@@ -111,8 +151,18 @@ int main(int argc, char* argv[])
              po::value<unsigned int>(&par.seed)
                  ->default_value(par.seed),
              "Base RNG seed; bootstrap sample i uses seed + i")
-	
-			("do-roots-n2",
+
+            ("root-algorithm",
+             po::value<std::string>(&par.root_algorithm)
+                 ->default_value(par.root_algorithm),
+             "Root finder algorithm: hybridS, hybrid, or hybridSJ")
+
+            ("root-start-point",
+             po::value<std::vector<std::string>>(&root_start_point_args)
+                 ->composing(),
+             "Root finder initial guess Re,Im. Can be repeated, e.g. --root-start-point 40,0 --root-start-point 55,10. If omitted, the Re/Im range grid is used.")
+				
+					("do-roots-n2",
 				 po::value<bool>(&par.do_roots_n2)
 				     ->default_value(par.do_roots_n2),
 				 "Calculate and save n=2 roots")
@@ -141,14 +191,27 @@ int main(int argc, char* argv[])
 
         po::notify(vm);
 
-        if (vm.count("help")) {
+		        if (vm.count("help")) {
 
-            std::cout << desc << "\n";
+	            std::cout << desc << "\n";
 
-            return 0;
-        }
+		            return 0;
+		        }
 
-        LYZ(
+		        if (par.root_algorithm != "hybridS" &&
+		            par.root_algorithm != "hybrid" &&
+		            par.root_algorithm != "hybridSJ") {
+
+		            throw std::runtime_error(
+		                "Invalid --root-algorithm. Use hybridS, hybrid, or hybridSJ."
+		            );
+		        }
+
+                for (const auto& arg : root_start_point_args) {
+                    par.root_start_points.push_back(ParseRootStartPoint(arg));
+                }
+
+		        LYZ(
             input_file.c_str(),
             output_file.c_str(),
             par
