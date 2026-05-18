@@ -27,6 +27,7 @@ struct LYZParameters {
     unsigned int seed = 12345;
     std::string root_algorithm = "hybridS";
     std::vector<std::pair<double, double>> root_start_points;
+    bool multicore_root_search = false;
 	bool do_roots_n2 = true;
 	bool do_roots_n3 = false;
 	
@@ -146,6 +147,11 @@ int main(int argc, char* argv[])
              po::value<int>(&par.ncore)
                  ->default_value(par.ncore),
              "Number of OpenMP threads")
+
+            ("multicore-root-search",
+             po::value<bool>(&par.multicore_root_search)
+                 ->default_value(par.multicore_root_search),
+             "Use OpenMP threads over Re/Im root-start points instead of bootstrap resampling")
 
             ("seed",
              po::value<unsigned int>(&par.seed)

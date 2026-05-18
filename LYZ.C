@@ -347,6 +347,7 @@ struct LYZParameters {
     unsigned int seed = 12345;
     std::string root_algorithm = "hybridS";
     std::vector<std::pair<double, double>> root_start_points;
+    bool multicore_root_search = false;
 				
 	bool do_roots_n2 = true;
     bool do_roots_n3 = false;
@@ -530,6 +531,7 @@ void LYZ(const char* input_filename,
 	    const std::string root_algorithm = par.root_algorithm;
 	    const auto root_finder_algorithm = ParseRootAlgorithm(root_algorithm);
         const auto root_start_points = BuildRootStartPoints(par);
+        const bool multicore_root_search = par.multicore_root_search;
 	
 	const double max_found_root_size =
         2 * MaxRootSearchRadius(root_start_points, re_max, im_max); // sometimes the rootfinder finds very big roots, we discard them. 
@@ -618,7 +620,7 @@ void LYZ(const char* input_filename,
 	std::cout << "0%\n";
 
 	omp_set_num_threads(ncore);
-	#pragma omp parallel for schedule(dynamic)
+	#pragma omp parallel for schedule(dynamic) if(!multicore_root_search)
 	for (int ires = 0; ires < Nres; ++ires) {
 		TRandom3 rng(seed + static_cast<unsigned int>(ires));
 	    std::vector<double> e2_bootstrap, e3_bootstrap;
@@ -676,41 +678,105 @@ void LYZ(const char* input_filename,
 	
 		if (do_roots_n2 || do_roots_n3)
 		{
-		    for (const auto& start_point : root_start_points) {
-                double re = start_point.first;
-                double im = start_point.second;
+		    const int n_start_points =
+		        static_cast<int>(root_start_points.size());
 
-	            		if (do_roots_n2) {
-	            		    RootResult r2 =
-	            		        (root_algorithm == "hybridSJ")
-	            		            ? FindComplexZero_withJacobian(e2_bootstrap, re, im)
-	            		            : FindComplexZero_noDerivative(
-	            		                  e2_bootstrap,
-	            		                  re,
-	            		                  im,
-	            		                  root_finder_algorithm
-	            		              );
+		    if (multicore_root_search && n_start_points > 1) {
+		        #pragma omp parallel
+		        {
+		            std::vector<RootResult> local_roots_n2;
+		            std::vector<RootResult> local_roots_n3;
 
-	            		    if (IsGoodRoot(r2, max_found_root_size)) {
-	            		        roots_n2.push_back(r2);
-	            		    }
-		            		}
+		            #pragma omp for schedule(dynamic)
+		            for (int istart = 0; istart < n_start_points; ++istart) {
+		                const auto& start_point =
+		                    root_start_points[static_cast<std::size_t>(istart)];
+		                double re = start_point.first;
+		                double im = start_point.second;
 
-	            		if (do_roots_n3) {
-	            		    RootResult r3 =
-	            		        (root_algorithm == "hybridSJ")
-	            		            ? FindComplexZero_withJacobian(e3_bootstrap, re, im)
-	            		            : FindComplexZero_noDerivative(
-	            		                  e3_bootstrap,
-	            		                  re,
-	            		                  im,
-	            		                  root_finder_algorithm
-	            		              );
+		                if (do_roots_n2) {
+		                    RootResult r2 =
+		                        (root_algorithm == "hybridSJ")
+		                            ? FindComplexZero_withJacobian(e2_bootstrap, re, im)
+		                            : FindComplexZero_noDerivative(
+		                                  e2_bootstrap,
+		                                  re,
+		                                  im,
+		                                  root_finder_algorithm
+		                              );
 
-	            		    if (IsGoodRoot(r3, max_found_root_size)) {
-	            		        roots_n3.push_back(r3);
-	            		    }
-	            		}
+		                    if (IsGoodRoot(r2, max_found_root_size)) {
+		                        local_roots_n2.push_back(r2);
+		                    }
+		                }
+
+		                if (do_roots_n3) {
+		                    RootResult r3 =
+		                        (root_algorithm == "hybridSJ")
+		                            ? FindComplexZero_withJacobian(e3_bootstrap, re, im)
+		                            : FindComplexZero_noDerivative(
+		                                  e3_bootstrap,
+		                                  re,
+		                                  im,
+		                                  root_finder_algorithm
+		                              );
+
+		                    if (IsGoodRoot(r3, max_found_root_size)) {
+		                        local_roots_n3.push_back(r3);
+		                    }
+		                }
+		            }
+
+		            #pragma omp critical(merge_root_search_results)
+		            {
+		                roots_n2.insert(
+		                    roots_n2.end(),
+		                    local_roots_n2.begin(),
+		                    local_roots_n2.end()
+		                );
+		                roots_n3.insert(
+		                    roots_n3.end(),
+		                    local_roots_n3.begin(),
+		                    local_roots_n3.end()
+		                );
+		            }
+		        }
+		    } else {
+		        for (const auto& start_point : root_start_points) {
+                    double re = start_point.first;
+                    double im = start_point.second;
+
+		            if (do_roots_n2) {
+		                RootResult r2 =
+		                    (root_algorithm == "hybridSJ")
+		                        ? FindComplexZero_withJacobian(e2_bootstrap, re, im)
+		                        : FindComplexZero_noDerivative(
+		                              e2_bootstrap,
+		                              re,
+		                              im,
+		                              root_finder_algorithm
+		                          );
+
+		                if (IsGoodRoot(r2, max_found_root_size)) {
+		                    roots_n2.push_back(r2);
+		                }
+		            }
+
+		            if (do_roots_n3) {
+		                RootResult r3 =
+		                    (root_algorithm == "hybridSJ")
+		                        ? FindComplexZero_withJacobian(e3_bootstrap, re, im)
+		                        : FindComplexZero_noDerivative(
+		                              e3_bootstrap,
+		                              re,
+		                              im,
+		                              root_finder_algorithm
+		                          );
+
+		                if (IsGoodRoot(r3, max_found_root_size)) {
+		                    roots_n3.push_back(r3);
+		                }
+		            }
 
 			            // RootResult r = FindComplexZero_noDerivative(e2_bootstrap, re, im);
 			
@@ -731,6 +797,7 @@ void LYZ(const char* input_filename,
     					// 	continue;
 			            // local_roots.push_back(r);
 			
+		        }
 			}
 		}
 			const double tol = 1e-6;
