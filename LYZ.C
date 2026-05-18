@@ -624,15 +624,17 @@ void LYZ(const char* input_filename,
 	for (int ires = 0; ires < Nres; ++ires) {
 		TRandom3 rng(seed + static_cast<unsigned int>(ires));
 	    std::vector<double> e2_bootstrap, e3_bootstrap;
+	    std::vector<int> bootstrap_picks;
+	    bootstrap_picks.reserve(Nsub);
+
+	    for (int isub = 0; isub < Nsub; ++isub) {
+	        bootstrap_picks.push_back(rng.Integer(Nsub));
+	    }
 
 		if (do_roots_n2 || do_cumulants_n2) {
 	    	
 			e2_bootstrap.reserve(nevents);
-	    	for (int isub = 0; isub < Nsub; ++isub) {
-	    	   
-				// int pick = dist(rng);
-				int pick = rng.Integer(Nsub);
-	    	    
+	    	for (int pick : bootstrap_picks) {
 				e2_bootstrap.insert(
 	    	        e2_bootstrap.end(),
 	    	        subsamples_e2[pick].begin(),
@@ -643,11 +645,7 @@ void LYZ(const char* input_filename,
 		if (do_roots_n3 || do_cumulants_n3) {
 	    	
 			e3_bootstrap.reserve(nevents);
-	    	for (int isub = 0; isub < Nsub; ++isub) {
-	    	    
-				// int pick = dist(rng);
-				int pick = rng.Integer(Nsub);
-	    	    
+	    	for (int pick : bootstrap_picks) {
 				e3_bootstrap.insert(
 	    	        e3_bootstrap.end(),
 	    	        subsamples_e3[pick].begin(),
