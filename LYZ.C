@@ -616,6 +616,14 @@ void LYZ(const char* input_filename,
 	gErrorIgnoreLevel = kFatal;
 
 	int completed_bootstrap = 0;
+	long long completed_root_search_points = 0;
+	const bool report_root_search_progress =
+	    multicore_root_search && (do_roots_n2 || do_roots_n3);
+	const long long total_root_search_points =
+	    report_root_search_progress
+	        ? static_cast<long long>(Nres) *
+	              static_cast<long long>(root_start_points.size())
+	        : 0;
 
 	std::cout << "0%\n";
 
@@ -723,6 +731,21 @@ void LYZ(const char* input_filename,
 		                        local_roots_n3.push_back(r3);
 		                    }
 		                }
+
+		                if (total_root_search_points > 0) {
+		                    long long done = 0;
+		                    #pragma omp atomic capture
+		                    done = ++completed_root_search_points;
+
+		                    const double percent =
+		                        100.0 * static_cast<double>(done) /
+		                        static_cast<double>(total_root_search_points);
+
+		                    #pragma omp critical(print_progress)
+		                    {
+		                        std::cout << percent << "%\n";
+		                    }
+		                }
 		            }
 
 		            #pragma omp critical(merge_root_search_results)
@@ -773,6 +796,22 @@ void LYZ(const char* input_filename,
 
 		                if (IsGoodRoot(r3, max_found_root_size)) {
 		                    roots_n3.push_back(r3);
+		                }
+		            }
+
+		            if (report_root_search_progress &&
+		                total_root_search_points > 0) {
+		                long long done = 0;
+		                #pragma omp atomic capture
+		                done = ++completed_root_search_points;
+
+		                const double percent =
+		                    100.0 * static_cast<double>(done) /
+		                    static_cast<double>(total_root_search_points);
+
+		                #pragma omp critical(print_progress)
+		                {
+		                    std::cout << percent << "%\n";
 		                }
 		            }
 
@@ -855,16 +894,18 @@ void LYZ(const char* input_filename,
 				if (do_roots_n3)
 					roots_n3_from_resampling[ires] = unique_roots_n3;
 
-			int done = 0;
-			#pragma omp atomic capture
-			done = ++completed_bootstrap;
-
-			const double percent =
-			    100.0 * static_cast<double>(done) / static_cast<double>(Nres);
-
-			#pragma omp critical(print_progress)
-			{
-				std::cout << percent << "%\n";
+			if (!report_root_search_progress) {
+				int done = 0;
+				#pragma omp atomic capture
+				done = ++completed_bootstrap;
+	
+				const double percent =
+				    100.0 * static_cast<double>(done) / static_cast<double>(Nres);
+	
+				#pragma omp critical(print_progress)
+				{
+					std::cout << percent << "%\n";
+				}
 			}
 		}
 
