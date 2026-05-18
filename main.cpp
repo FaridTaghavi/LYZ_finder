@@ -21,7 +21,7 @@ struct LYZParameters {
     int Nsub = 10;
     int Nres = 500;
 
-    std::size_t max_events = 1000;
+    std::size_t max_events = 0;
 
     int ncore = 13;
     unsigned int seed = 12345;
@@ -141,7 +141,7 @@ int main(int argc, char* argv[])
             ("max-events",
              po::value<std::size_t>(&par.max_events)
                  ->default_value(par.max_events),
-             "Maximum number of events")
+             "Maximum number of events; 0 means use all available events")
 
             ("ncore",
              po::value<int>(&par.ncore)

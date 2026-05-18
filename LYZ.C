@@ -341,7 +341,7 @@ struct LYZParameters {
     int Nsub = 10;
     int Nres = 500;
 
-    std::size_t max_events = 1000;
+    std::size_t max_events = 0;
 
     int ncore = 13;
     unsigned int seed = 12345;
@@ -552,7 +552,9 @@ void LYZ(const char* input_filename,
 	
 	
 	const std::size_t nevents =
-	    std::min<std::size_t>(max_events, tree->GetEntries());
+	    (max_events == 0)
+	        ? static_cast<std::size_t>(tree->GetEntries())
+	        : std::min<std::size_t>(max_events, tree->GetEntries());
 
 	
 	// Keeping unbunched events are needed anymore!
