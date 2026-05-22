@@ -481,6 +481,7 @@ struct ThetaScanPoint {
 struct ThetaFitResult {
     bool ok;
     int status;
+    int npeaks;
     std::vector<double> coeffs;
     std::vector<double> coeff_errors;
     double chi2;
@@ -606,6 +607,7 @@ ThetaFitResult FitThetaPolynomial(
     ThetaFitResult result;
     result.ok = false;
     result.status = -999;
+    result.npeaks = 0;
     result.chi2 = std::numeric_limits<double>::quiet_NaN();
     result.ndf = 0;
     result.chi2_per_ndf = std::numeric_limits<double>::quiet_NaN();
@@ -616,6 +618,7 @@ ThetaFitResult FitThetaPolynomial(
             peaks.push_back(p);
         }
     }
+    result.npeaks = static_cast<int>(peaks.size());
 
     const int npar = degree + 1;
     if (degree < 0 || static_cast<int>(peaks.size()) < npar) {
@@ -688,6 +691,7 @@ void WriteThetaOutputs(
     fit_out << "# theta(k) = sum_i theta_i k^i fitted to peaks of log|G(k)|\n";
     fit_out << "# ok " << (fit.ok ? 1 : 0) << "\n";
     fit_out << "# status " << fit.status << "\n";
+    fit_out << "# npeaks " << fit.npeaks << "\n";
     fit_out << "# chi2 " << fit.chi2 << "\n";
     fit_out << "# ndf " << fit.ndf << "\n";
     fit_out << "# chi2_per_ndf " << fit.chi2_per_ndf << "\n";
@@ -913,7 +917,10 @@ void LYZ(const char* input_filename,
 			theta_coeffs_n2 = fit.coeffs;
 			std::cout << "Using fitted theta(k) for n=2 root search\n";
 		} else {
-			std::cout << "Theta fit for n=2 failed; root search will use raw G(k)\n";
+			std::cout << "Theta fit for n=2 failed with "
+			          << fit.npeaks << " peaks for degree "
+			          << theta_degree
+			          << "; root search will use raw G(k)\n";
 		}
 	}
 
@@ -926,7 +933,10 @@ void LYZ(const char* input_filename,
 			theta_coeffs_n3 = fit.coeffs;
 			std::cout << "Using fitted theta(k) for n=3 root search\n";
 		} else {
-			std::cout << "Theta fit for n=3 failed; root search will use raw G(k)\n";
+			std::cout << "Theta fit for n=3 failed with "
+			          << fit.npeaks << " peaks for degree "
+			          << theta_degree
+			          << "; root search will use raw G(k)\n";
 		}
 	}
 	const std::vector<double>* theta_for_roots_n2 =
