@@ -39,6 +39,7 @@ struct LYZParameters {
     double theta_k_max = 200.0;
     double theta_dk = 0.25;
     int theta_degree = 4;
+    int epsilon_bins = 0;
 	
 };
 
@@ -217,7 +218,12 @@ int main(int argc, char* argv[])
             ("theta-degree",
                  po::value<int>(&par.theta_degree)
                      ->default_value(par.theta_degree),
-                 "Polynomial degree used to fit theta(k) from log|G(k)| peaks");
+                 "Polynomial degree used to fit theta(k) from log|G(k)| peaks")
+
+            ("epsilon-bins",
+                 po::value<int>(&par.epsilon_bins)
+                     ->default_value(par.epsilon_bins),
+                 "Use this many epsilon bins for root finding; 0 uses all events exactly");
 
         po::variables_map vm;
 
@@ -258,6 +264,10 @@ int main(int argc, char* argv[])
 
                 if (par.theta_degree < 0) {
                     throw std::runtime_error("--theta-degree must be non-negative.");
+                }
+
+                if (par.epsilon_bins < 0) {
+                    throw std::runtime_error("--epsilon-bins must be non-negative.");
                 }
 
 		        LYZ(

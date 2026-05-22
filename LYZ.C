@@ -125,6 +125,111 @@ void MeanJ0_derivative_complex(std::complex<double> k,
                      : std::complex<double>(0.0, 0.0);
 }
 
+struct EpsilonSample {
+    const std::vector<double>* raw = nullptr;
+    std::vector<double> values;
+    std::vector<double> weights;
+    bool binned = false;
+};
+
+EpsilonSample BuildEpsilonSample(
+    const std::vector<double>& e_vals,
+    int epsilon_bins
+)
+{
+    EpsilonSample sample;
+
+    if (epsilon_bins <= 0 || e_vals.empty()) {
+        sample.raw = &e_vals;
+        sample.binned = false;
+        return sample;
+    }
+
+    const auto [min_it, max_it] =
+        std::minmax_element(e_vals.begin(), e_vals.end());
+    const double min_e = *min_it;
+    const double max_e = *max_it;
+
+    if (max_e <= min_e) {
+        sample.values.push_back(min_e);
+        sample.weights.push_back(1.0);
+        sample.binned = true;
+        return sample;
+    }
+
+    sample.values.assign(static_cast<std::size_t>(epsilon_bins), 0.0);
+    sample.weights.assign(static_cast<std::size_t>(epsilon_bins), 0.0);
+
+    const double width = (max_e - min_e) / static_cast<double>(epsilon_bins);
+    for (int ibin = 0; ibin < epsilon_bins; ++ibin) {
+        sample.values[static_cast<std::size_t>(ibin)] =
+            min_e + (static_cast<double>(ibin) + 0.5) * width;
+    }
+
+    for (double e : e_vals) {
+        int ibin = static_cast<int>((e - min_e) / width);
+        if (ibin < 0) ibin = 0;
+        if (ibin >= epsilon_bins) ibin = epsilon_bins - 1;
+        sample.weights[static_cast<std::size_t>(ibin)] += 1.0;
+    }
+
+    const double norm = static_cast<double>(e_vals.size());
+    std::vector<double> compact_values;
+    std::vector<double> compact_weights;
+    compact_values.reserve(sample.values.size());
+    compact_weights.reserve(sample.weights.size());
+
+    for (std::size_t i = 0; i < sample.values.size(); ++i) {
+        if (sample.weights[i] <= 0.0) continue;
+        compact_values.push_back(sample.values[i]);
+        compact_weights.push_back(sample.weights[i] / norm);
+    }
+
+    sample.values.swap(compact_values);
+    sample.weights.swap(compact_weights);
+    sample.binned = true;
+    return sample;
+}
+
+void MeanJ0_complex_sample(
+    std::complex<double> k,
+    const EpsilonSample& sample,
+    std::complex<double>& result
+)
+{
+    if (!sample.binned) {
+        MeanJ0_complex(k, *sample.raw, result);
+        return;
+    }
+
+    std::complex<double> sum{0.0, 0.0};
+    for (std::size_t i = 0; i < sample.values.size(); ++i) {
+        sum += sample.weights[i] * J0_complex(k * sample.values[i]);
+    }
+
+    result = sum;
+}
+
+void MeanJ0_derivative_complex_sample(
+    std::complex<double> k,
+    const EpsilonSample& sample,
+    std::complex<double>& result
+)
+{
+    if (!sample.binned) {
+        MeanJ0_derivative_complex(k, *sample.raw, result);
+        return;
+    }
+
+    std::complex<double> sum{0.0, 0.0};
+    for (std::size_t i = 0; i < sample.values.size(); ++i) {
+        const double e = sample.values[i];
+        sum += sample.weights[i] * (-e * J1_complex(k * e));
+    }
+
+    result = sum;
+}
+
 std::complex<double> EvaluatePolynomial(
     const std::vector<double>& coeffs,
     const std::complex<double>& k
@@ -187,34 +292,34 @@ std::complex<double> ApplyThetaNormalizationToDerivative(
 
 
 struct ReMeanJ0 {
-    const std::vector<double>& e2_vals;
+    const EpsilonSample& e2_vals;
     const std::vector<double>* theta_coeffs;
     
-	ReMeanJ0(const std::vector<double>& vals,
+	ReMeanJ0(const EpsilonSample& vals,
              const std::vector<double>* theta = nullptr)
         : e2_vals(vals), theta_coeffs(theta) {}
     
 	double operator()(const double* x) const {
         std::complex<double> k{x[0], x[1]};
 		std::complex<double> result; 
-        MeanJ0_complex(k, e2_vals, result);
+        MeanJ0_complex_sample(k, e2_vals, result);
         result = ApplyThetaNormalization(result, k, theta_coeffs);
         return result.real(); 
     }
 };
 
 struct ImMeanJ0 {
-    const std::vector<double>& e2_vals;
+    const EpsilonSample& e2_vals;
     const std::vector<double>* theta_coeffs;
 
-	ImMeanJ0(const std::vector<double>& vals,
+	ImMeanJ0(const EpsilonSample& vals,
              const std::vector<double>* theta = nullptr)
         : e2_vals(vals), theta_coeffs(theta) {}
     
 	double operator()(const double* x) const {
         std::complex<double> k{x[0], x[1]};
 		std::complex<double> result; 
-        MeanJ0_complex(k, e2_vals, result);
+        MeanJ0_complex_sample(k, e2_vals, result);
         result = ApplyThetaNormalization(result, k, theta_coeffs);
         return result.imag(); 
     }
@@ -222,7 +327,7 @@ struct ImMeanJ0 {
 
 class ReMeanJ0Grad : public ROOT::Math::IGradientFunctionMultiDim {
 public:
-    explicit ReMeanJ0Grad(const std::vector<double>& e2,
+    explicit ReMeanJ0Grad(const EpsilonSample& e2,
                           const std::vector<double>* theta = nullptr)
         : e2_vals(e2), theta_coeffs(theta) {}
 
@@ -236,7 +341,7 @@ private:
     double DoEval(const double* x) const override {
         std::complex<double> k{x[0], x[1]};
         std::complex<double> val;
-        MeanJ0_complex(k, e2_vals, val);
+        MeanJ0_complex_sample(k, e2_vals, val);
         val = ApplyThetaNormalization(val, k, theta_coeffs);
         return val.real();
     }
@@ -245,8 +350,8 @@ private:
         std::complex<double> k{x[0], x[1]};
         std::complex<double> val;
         std::complex<double> dfdk;
-        MeanJ0_complex(k, e2_vals, val);
-        MeanJ0_derivative_complex(k, e2_vals, dfdk);
+        MeanJ0_complex_sample(k, e2_vals, val);
+        MeanJ0_derivative_complex_sample(k, e2_vals, dfdk);
         dfdk = ApplyThetaNormalizationToDerivative(
             val,
             dfdk,
@@ -260,13 +365,13 @@ private:
         return (icoord == 0) ? a : -b;
     }
 
-    const std::vector<double>& e2_vals;
+    const EpsilonSample& e2_vals;
     const std::vector<double>* theta_coeffs;
 };
 
 class ImMeanJ0Grad : public ROOT::Math::IGradientFunctionMultiDim {
 public:
-    explicit ImMeanJ0Grad(const std::vector<double>& e2,
+    explicit ImMeanJ0Grad(const EpsilonSample& e2,
                           const std::vector<double>* theta = nullptr)
         : e2_vals(e2), theta_coeffs(theta) {}
 
@@ -280,7 +385,7 @@ private:
     double DoEval(const double* x) const override {
         std::complex<double> k{x[0], x[1]};
         std::complex<double> val;
-        MeanJ0_complex(k, e2_vals, val);
+        MeanJ0_complex_sample(k, e2_vals, val);
         val = ApplyThetaNormalization(val, k, theta_coeffs);
         return val.imag();
     }
@@ -289,8 +394,8 @@ private:
         std::complex<double> k{x[0], x[1]};
         std::complex<double> val;
         std::complex<double> dfdk;
-        MeanJ0_complex(k, e2_vals, val);
-        MeanJ0_derivative_complex(k, e2_vals, dfdk);
+        MeanJ0_complex_sample(k, e2_vals, val);
+        MeanJ0_derivative_complex_sample(k, e2_vals, dfdk);
         dfdk = ApplyThetaNormalizationToDerivative(
             val,
             dfdk,
@@ -304,7 +409,7 @@ private:
         return (icoord == 0) ? b : a;
     }
 
-    const std::vector<double>& e2_vals;
+    const EpsilonSample& e2_vals;
     const std::vector<double>* theta_coeffs;
 };
 
@@ -318,7 +423,7 @@ struct RootResult {
 
 
 RootResult FindComplexZero_noDerivative(
-    const std::vector<double>& e2_list,
+    const EpsilonSample& e2_list,
     double x0_re,
     double x0_im,
     const std::vector<double>* theta_coeffs = nullptr,
@@ -370,7 +475,7 @@ RootResult FindComplexZero_noDerivative(
 }
 
 RootResult FindComplexZero_withJacobian(
-    const std::vector<double>& e2_list,
+    const EpsilonSample& e2_list,
     double x0_re,
     double x0_im,
     const std::vector<double>* theta_coeffs = nullptr
@@ -453,6 +558,7 @@ struct LYZParameters {
     double theta_k_max = 200.0;
     double theta_dk = 0.25;
     int theta_degree = 4;
+    int epsilon_bins = 0;
 };
 
 struct VnPowers {
@@ -815,6 +921,7 @@ void LYZ(const char* input_filename,
 	const double theta_k_max = par.theta_k_max;
 	const double theta_dk = par.theta_dk;
 	const int theta_degree = par.theta_degree;
+	const int epsilon_bins = par.epsilon_bins;
 
     const std::size_t max_events = par.max_events;
 
@@ -848,6 +955,15 @@ void LYZ(const char* input_filename,
 	    (max_events == 0)
 	        ? static_cast<std::size_t>(tree->GetEntries())
 	        : std::min<std::size_t>(max_events, tree->GetEntries());
+
+	std::cout << "Input entries: " << tree->GetEntries() << "\n";
+	std::cout << "Requested max events: "
+	          << (max_events == 0 ? std::string("all") : std::to_string(max_events))
+	          << "\n";
+	std::cout << "Using events: " << nevents << "\n";
+	std::cout << "Epsilon bins for root finding: "
+	          << (epsilon_bins == 0 ? std::string("off") : std::to_string(epsilon_bins))
+	          << "\n";
 
 	
 	// Keeping unbunched events are needed anymore!
@@ -1029,6 +1145,14 @@ void LYZ(const char* input_filename,
 		// <<<<<<<<<<<<<<<  Find roots >>>>>>>>>>>>>>>
 
 		std::vector<RootResult> roots_n2, roots_n3;
+		EpsilonSample root_sample_n2;
+		EpsilonSample root_sample_n3;
+		if (do_roots_n2) {
+			root_sample_n2 = BuildEpsilonSample(e2_bootstrap, epsilon_bins);
+		}
+		if (do_roots_n3) {
+			root_sample_n3 = BuildEpsilonSample(e3_bootstrap, epsilon_bins);
+		}
 	
 	
 		if (do_roots_n2 || do_roots_n3)
@@ -1053,13 +1177,13 @@ void LYZ(const char* input_filename,
 		                    RootResult r2 =
 		                        (root_algorithm == "hybridSJ")
 		                            ? FindComplexZero_withJacobian(
-		                                  e2_bootstrap,
+		                                  root_sample_n2,
 		                                  re,
 		                                  im,
 		                                  theta_for_roots_n2
 		                              )
 		                            : FindComplexZero_noDerivative(
-		                                  e2_bootstrap,
+		                                  root_sample_n2,
 		                                  re,
 		                                  im,
 		                                  theta_for_roots_n2,
@@ -1075,13 +1199,13 @@ void LYZ(const char* input_filename,
 		                    RootResult r3 =
 		                        (root_algorithm == "hybridSJ")
 		                            ? FindComplexZero_withJacobian(
-		                                  e3_bootstrap,
+		                                  root_sample_n3,
 		                                  re,
 		                                  im,
 		                                  theta_for_roots_n3
 		                              )
 		                            : FindComplexZero_noDerivative(
-		                                  e3_bootstrap,
+		                                  root_sample_n3,
 		                                  re,
 		                                  im,
 		                                  theta_for_roots_n3,
@@ -1132,13 +1256,13 @@ void LYZ(const char* input_filename,
 		                RootResult r2 =
 		                    (root_algorithm == "hybridSJ")
 		                        ? FindComplexZero_withJacobian(
-		                              e2_bootstrap,
+		                              root_sample_n2,
 		                              re,
 		                              im,
 		                              theta_for_roots_n2
 		                          )
 		                        : FindComplexZero_noDerivative(
-		                              e2_bootstrap,
+		                              root_sample_n2,
 		                              re,
 		                              im,
 		                              theta_for_roots_n2,
@@ -1154,13 +1278,13 @@ void LYZ(const char* input_filename,
 		                RootResult r3 =
 		                    (root_algorithm == "hybridSJ")
 		                        ? FindComplexZero_withJacobian(
-		                              e3_bootstrap,
+		                              root_sample_n3,
 		                              re,
 		                              im,
 		                              theta_for_roots_n3
 		                          )
 		                        : FindComplexZero_noDerivative(
-		                              e3_bootstrap,
+		                              root_sample_n3,
 		                              re,
 		                              im,
 		                              theta_for_roots_n3,

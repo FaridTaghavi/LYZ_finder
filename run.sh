@@ -16,6 +16,7 @@ OUTPUT_FOLDER="${2:-results}"
 ./build/LYZ \
     --input "$INPUT_FILE" \
     --output "$OUTPUT_FOLDER" \
+	--epsilon-bins 500 \
     --do-theta-n2 true \
     --theta-k-max 200 \
     --theta-dk 0.25 \
@@ -28,7 +29,7 @@ OUTPUT_FOLDER="${2:-results}"
     --dim 10 \
     --nsub 30 \
     --nres 1000 \
-    --max-events 1000 \
+    --max-events 100000 \
     --multicore-root-search true \
     --ncore 5 \
     --seed 12345 \
