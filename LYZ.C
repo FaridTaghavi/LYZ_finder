@@ -11,6 +11,9 @@
 
 #include "TCanvas.h"
 #include "TGraph.h"
+#include "TF1.h"
+#include "TFitResult.h"
+#include "TFitResultPtr.h"
 #include "TMath.h"
 #include "TAxis.h"
 #include <TFile.h>
@@ -48,6 +51,7 @@
 #include <limits>
 #include <exception>
 #include <algorithm>
+#include <iomanip>
 
 #include "event_CLASS.h"
 #include <filesystem>
@@ -121,40 +125,106 @@ void MeanJ0_derivative_complex(std::complex<double> k,
                      : std::complex<double>(0.0, 0.0);
 }
 
+std::complex<double> EvaluatePolynomial(
+    const std::vector<double>& coeffs,
+    const std::complex<double>& k
+)
+{
+    std::complex<double> value{0.0, 0.0};
+    for (auto it = coeffs.rbegin(); it != coeffs.rend(); ++it) {
+        value = value * k + *it;
+    }
+
+    return value;
+}
+
+std::complex<double> EvaluatePolynomialDerivative(
+    const std::vector<double>& coeffs,
+    const std::complex<double>& k
+)
+{
+    if (coeffs.size() <= 1) {
+        return {0.0, 0.0};
+    }
+
+    std::complex<double> value{0.0, 0.0};
+    for (std::size_t i = coeffs.size() - 1; i > 0; --i) {
+        value = value * k + static_cast<double>(i) * coeffs[i];
+    }
+
+    return value;
+}
+
+std::complex<double> ApplyThetaNormalization(
+    const std::complex<double>& G,
+    const std::complex<double>& k,
+    const std::vector<double>* theta_coeffs
+)
+{
+    if (!theta_coeffs || theta_coeffs->empty()) {
+        return G;
+    }
+
+    return std::exp(-EvaluatePolynomial(*theta_coeffs, k)) * G;
+}
+
+std::complex<double> ApplyThetaNormalizationToDerivative(
+    const std::complex<double>& G,
+    const std::complex<double>& dGdk,
+    const std::complex<double>& k,
+    const std::vector<double>* theta_coeffs
+)
+{
+    if (!theta_coeffs || theta_coeffs->empty()) {
+        return dGdk;
+    }
+
+    const std::complex<double> theta = EvaluatePolynomial(*theta_coeffs, k);
+    const std::complex<double> dtheta = EvaluatePolynomialDerivative(*theta_coeffs, k);
+    return std::exp(-theta) * (dGdk - dtheta * G);
+}
+
 
 
 struct ReMeanJ0 {
     const std::vector<double>& e2_vals;
+    const std::vector<double>* theta_coeffs;
     
-	ReMeanJ0(const std::vector<double>& vals)
-        : e2_vals(vals) {}
+	ReMeanJ0(const std::vector<double>& vals,
+             const std::vector<double>* theta = nullptr)
+        : e2_vals(vals), theta_coeffs(theta) {}
     
 	double operator()(const double* x) const {
         std::complex<double> k{x[0], x[1]};
 		std::complex<double> result; 
         MeanJ0_complex(k, e2_vals, result);
+        result = ApplyThetaNormalization(result, k, theta_coeffs);
         return result.real(); 
     }
 };
 
 struct ImMeanJ0 {
     const std::vector<double>& e2_vals;
+    const std::vector<double>* theta_coeffs;
 
-	ImMeanJ0(const std::vector<double>& vals)
-        : e2_vals(vals) {}
+	ImMeanJ0(const std::vector<double>& vals,
+             const std::vector<double>* theta = nullptr)
+        : e2_vals(vals), theta_coeffs(theta) {}
     
 	double operator()(const double* x) const {
         std::complex<double> k{x[0], x[1]};
 		std::complex<double> result; 
         MeanJ0_complex(k, e2_vals, result);
+        result = ApplyThetaNormalization(result, k, theta_coeffs);
         return result.imag(); 
     }
 	};
 
 class ReMeanJ0Grad : public ROOT::Math::IGradientFunctionMultiDim {
 public:
-    explicit ReMeanJ0Grad(const std::vector<double>& e2)
-        : e2_vals(e2) {}
+    explicit ReMeanJ0Grad(const std::vector<double>& e2,
+                          const std::vector<double>* theta = nullptr)
+        : e2_vals(e2), theta_coeffs(theta) {}
 
     unsigned int NDim() const override { return 2; }
 
@@ -167,13 +237,22 @@ private:
         std::complex<double> k{x[0], x[1]};
         std::complex<double> val;
         MeanJ0_complex(k, e2_vals, val);
+        val = ApplyThetaNormalization(val, k, theta_coeffs);
         return val.real();
     }
 
     double DoDerivative(const double* x, unsigned int icoord) const override {
         std::complex<double> k{x[0], x[1]};
+        std::complex<double> val;
         std::complex<double> dfdk;
+        MeanJ0_complex(k, e2_vals, val);
         MeanJ0_derivative_complex(k, e2_vals, dfdk);
+        dfdk = ApplyThetaNormalizationToDerivative(
+            val,
+            dfdk,
+            k,
+            theta_coeffs
+        );
 
         double a = dfdk.real();
         double b = dfdk.imag();
@@ -182,12 +261,14 @@ private:
     }
 
     const std::vector<double>& e2_vals;
+    const std::vector<double>* theta_coeffs;
 };
 
 class ImMeanJ0Grad : public ROOT::Math::IGradientFunctionMultiDim {
 public:
-    explicit ImMeanJ0Grad(const std::vector<double>& e2)
-        : e2_vals(e2) {}
+    explicit ImMeanJ0Grad(const std::vector<double>& e2,
+                          const std::vector<double>* theta = nullptr)
+        : e2_vals(e2), theta_coeffs(theta) {}
 
     unsigned int NDim() const override { return 2; }
 
@@ -200,13 +281,22 @@ private:
         std::complex<double> k{x[0], x[1]};
         std::complex<double> val;
         MeanJ0_complex(k, e2_vals, val);
+        val = ApplyThetaNormalization(val, k, theta_coeffs);
         return val.imag();
     }
 
     double DoDerivative(const double* x, unsigned int icoord) const override {
         std::complex<double> k{x[0], x[1]};
+        std::complex<double> val;
         std::complex<double> dfdk;
+        MeanJ0_complex(k, e2_vals, val);
         MeanJ0_derivative_complex(k, e2_vals, dfdk);
+        dfdk = ApplyThetaNormalizationToDerivative(
+            val,
+            dfdk,
+            k,
+            theta_coeffs
+        );
 
         double a = dfdk.real();
         double b = dfdk.imag();
@@ -215,6 +305,7 @@ private:
     }
 
     const std::vector<double>& e2_vals;
+    const std::vector<double>* theta_coeffs;
 };
 
 struct RootResult {
@@ -230,6 +321,7 @@ RootResult FindComplexZero_noDerivative(
     const std::vector<double>& e2_list,
     double x0_re,
     double x0_im,
+    const std::vector<double>* theta_coeffs = nullptr,
     ROOT::Math::GSLMultiRootFinder::EType algorithm =
         ROOT::Math::GSLMultiRootFinder::kHybridS
 ) {
@@ -243,8 +335,8 @@ RootResult FindComplexZero_noDerivative(
     try {
         ROOT::Math::GSLMultiRootFinder finder(algorithm);
 
-        ReMeanJ0 f_re(e2_list);
-        ImMeanJ0 f_im(e2_list);
+        ReMeanJ0 f_re(e2_list, theta_coeffs);
+        ImMeanJ0 f_im(e2_list, theta_coeffs);
 
         finder.AddFunction(f_re, 2);
         finder.AddFunction(f_im, 2);
@@ -280,7 +372,8 @@ RootResult FindComplexZero_noDerivative(
 RootResult FindComplexZero_withJacobian(
     const std::vector<double>& e2_list,
     double x0_re,
-    double x0_im
+    double x0_im,
+    const std::vector<double>* theta_coeffs = nullptr
 ) {
     RootResult result;
     result.ok = false;
@@ -294,8 +387,8 @@ RootResult FindComplexZero_withJacobian(
             ROOT::Math::GSLMultiRootFinder::kHybridSJ
         );
 
-        ReMeanJ0Grad f_re(e2_list);
-        ImMeanJ0Grad f_im(e2_list);
+        ReMeanJ0Grad f_re(e2_list, theta_coeffs);
+        ImMeanJ0Grad f_im(e2_list, theta_coeffs);
 
         finder.AddFunction(f_re);
         finder.AddFunction(f_im);
@@ -354,6 +447,12 @@ struct LYZParameters {
 
     bool do_cumulants_n2 = true;
     bool do_cumulants_n3 = false;
+
+    bool do_theta_n2 = false;
+    bool do_theta_n3 = false;
+    double theta_k_max = 200.0;
+    double theta_dk = 0.25;
+    int theta_degree = 4;
 };
 
 struct VnPowers {
@@ -370,6 +469,23 @@ struct averageV {
 	double n6;
 	double n8;
 	double n10;
+};
+
+struct ThetaScanPoint {
+    double k;
+    double G;
+    double log_abs_G;
+    bool is_peak;
+};
+
+struct ThetaFitResult {
+    bool ok;
+    int status;
+    std::vector<double> coeffs;
+    std::vector<double> coeff_errors;
+    double chi2;
+    int ndf;
+    double chi2_per_ndf;
 };
 
 averageV ComputeMoments(const std::vector<double>& e)
@@ -417,6 +533,173 @@ VnPowers ComputeVnPowers(averageV av ) {
 	out.vn10to10 = (av.n10 + 5.0*(576.0*std::pow(av.n2,5.0) - 720.0 * std::pow(av.n2,3.0)* av.n4 + 80.0*std::pow(av.n2,2.0)*av.n6 - 20.0 * av.n4*av.n6 + 5.0*av.n2*(36.0*std::pow(av.n4,2.0) - av.n8)))/456.;
 
     return out;
+}
+
+std::vector<ThetaScanPoint> ScanLogAbsG(
+    const std::vector<double>& e_vals,
+    double k_max,
+    double dk
+)
+{
+    std::vector<ThetaScanPoint> scan;
+    if (e_vals.empty()) return scan;
+
+    const int n_steps = static_cast<int>(std::floor(k_max / dk));
+    scan.reserve(static_cast<std::size_t>(n_steps) + 2);
+
+    for (int i = 0; i <= n_steps; ++i) {
+        const double k = i * dk;
+        double G = 0.0;
+        MeanJ0(k, e_vals, G);
+        const double abs_G = std::abs(G);
+        const double log_abs_G =
+            (abs_G > 0.0)
+                ? std::log(abs_G)
+                : -std::numeric_limits<double>::infinity();
+
+        scan.push_back({k, G, log_abs_G, false});
+    }
+
+    if (scan.empty() || scan.back().k < k_max) {
+        double G = 0.0;
+        MeanJ0(k_max, e_vals, G);
+        const double abs_G = std::abs(G);
+        const double log_abs_G =
+            (abs_G > 0.0)
+                ? std::log(abs_G)
+                : -std::numeric_limits<double>::infinity();
+
+        scan.push_back({k_max, G, log_abs_G, false});
+    }
+
+    if (scan.size() >= 2 &&
+        std::isfinite(scan.front().log_abs_G) &&
+        scan.front().log_abs_G >= scan[1].log_abs_G) {
+        scan.front().is_peak = true;
+    }
+
+    for (std::size_t i = 1; i + 1 < scan.size(); ++i) {
+        const double prev = scan[i - 1].log_abs_G;
+        const double curr = scan[i].log_abs_G;
+        const double next = scan[i + 1].log_abs_G;
+
+        if (!std::isfinite(curr)) continue;
+        if (curr > prev && curr >= next) {
+            scan[i].is_peak = true;
+        }
+    }
+
+    if (scan.size() >= 2 &&
+        std::isfinite(scan.back().log_abs_G) &&
+        scan.back().log_abs_G > scan[scan.size() - 2].log_abs_G) {
+        scan.back().is_peak = true;
+    }
+
+    return scan;
+}
+
+ThetaFitResult FitThetaPolynomial(
+    const std::vector<ThetaScanPoint>& scan,
+    int degree
+)
+{
+    ThetaFitResult result;
+    result.ok = false;
+    result.status = -999;
+    result.chi2 = std::numeric_limits<double>::quiet_NaN();
+    result.ndf = 0;
+    result.chi2_per_ndf = std::numeric_limits<double>::quiet_NaN();
+
+    std::vector<ThetaScanPoint> peaks;
+    for (const auto& p : scan) {
+        if (p.is_peak && std::isfinite(p.log_abs_G)) {
+            peaks.push_back(p);
+        }
+    }
+
+    const int npar = degree + 1;
+    if (degree < 0 || static_cast<int>(peaks.size()) < npar) {
+        return result;
+    }
+
+    TGraph graph(static_cast<int>(peaks.size()));
+    for (std::size_t i = 0; i < peaks.size(); ++i) {
+        graph.SetPoint(
+            static_cast<int>(i),
+            peaks[i].k,
+            peaks[i].log_abs_G
+        );
+    }
+
+    const std::string function_name = "theta_pol" + std::to_string(degree);
+    const std::string formula = "pol" + std::to_string(degree);
+    TF1 fit_function(
+        function_name.c_str(),
+        formula.c_str(),
+        peaks.front().k,
+        peaks.back().k
+    );
+
+    TFitResultPtr fit_result = graph.Fit(&fit_function, "SQN");
+    result.status = static_cast<int>(fit_result);
+
+    result.coeffs.resize(static_cast<std::size_t>(npar));
+    result.coeff_errors.resize(static_cast<std::size_t>(npar));
+    for (int ipar = 0; ipar < npar; ++ipar) {
+        result.coeffs[static_cast<std::size_t>(ipar)] =
+            fit_function.GetParameter(ipar);
+        result.coeff_errors[static_cast<std::size_t>(ipar)] =
+            fit_function.GetParError(ipar);
+    }
+
+    result.chi2 = fit_function.GetChisquare();
+    result.ndf = fit_function.GetNDF();
+    result.chi2_per_ndf =
+        (result.ndf > 0) ? result.chi2 / static_cast<double>(result.ndf) : 0.0;
+    result.ok = (result.status == 0);
+    return result;
+}
+
+void WriteThetaOutputs(
+    const std::string& output_folder,
+    const std::string& label,
+    const std::vector<ThetaScanPoint>& scan,
+    const ThetaFitResult& fit
+)
+{
+    const std::string scan_filename =
+        output_folder + "/theta_scan_" + label + ".dat";
+    std::ofstream scan_out(scan_filename);
+
+    scan_out << std::setprecision(17);
+    scan_out << "# k  G(k)  log_abs_G(k)  is_peak\n";
+    for (const auto& p : scan) {
+        scan_out << p.k << " "
+                 << p.G << " "
+                 << p.log_abs_G << " "
+                 << (p.is_peak ? 1 : 0) << "\n";
+    }
+
+    const std::string fit_filename =
+        output_folder + "/theta_fit_" + label + ".dat";
+    std::ofstream fit_out(fit_filename);
+
+    fit_out << std::setprecision(17);
+    fit_out << "# theta(k) = sum_i theta_i k^i fitted to peaks of log|G(k)|\n";
+    fit_out << "# ok " << (fit.ok ? 1 : 0) << "\n";
+    fit_out << "# status " << fit.status << "\n";
+    fit_out << "# chi2 " << fit.chi2 << "\n";
+    fit_out << "# ndf " << fit.ndf << "\n";
+    fit_out << "# chi2_per_ndf " << fit.chi2_per_ndf << "\n";
+    fit_out << "# i  theta_i  theta_i_error\n";
+
+    for (std::size_t i = 0; i < fit.coeffs.size(); ++i) {
+        const double error =
+            (i < fit.coeff_errors.size())
+                ? fit.coeff_errors[i]
+                : std::numeric_limits<double>::quiet_NaN();
+        fit_out << i << " " << fit.coeffs[i] << " " << error << "\n";
+    }
 }
 
 bool IsGoodRoot(RootResult& r, double max_found_root_size)
@@ -523,6 +806,12 @@ void LYZ(const char* input_filename,
 	const bool do_cumulants_n2 = par.do_cumulants_n2;
 	const bool do_cumulants_n3 = par.do_cumulants_n3;
 
+	const bool do_theta_n2 = par.do_theta_n2;
+	const bool do_theta_n3 = par.do_theta_n3;
+	const double theta_k_max = par.theta_k_max;
+	const double theta_dk = par.theta_dk;
+	const int theta_degree = par.theta_degree;
+
     const std::size_t max_events = par.max_events;
 
 	// Numebr of cores in searching for the roots
@@ -564,6 +853,11 @@ void LYZ(const char* input_filename,
 
 	std::vector<std::vector<double>> subsamples_e2(Nsub);
 	std::vector<std::vector<double>> subsamples_e3(Nsub);
+	std::vector<double> all_e2;
+	std::vector<double> all_e3;
+
+	if (do_theta_n2) all_e2.reserve(nevents);
+	if (do_theta_n3) all_e3.reserve(nevents);
 
 
 	// Reading ttree and fill the subsample	
@@ -578,25 +872,68 @@ void LYZ(const char* input_filename,
 		
     	size_t isub = i % Nsub;
 		
-		if (do_roots_n2 || do_cumulants_n2) {
+		if (do_roots_n2 || do_cumulants_n2 || do_theta_n2) {
 		    double ex2 = event->Get_epsilonx(2);
 		    double ey2 = event->Get_epsilony(2);
 		    double e2 = std::sqrt(ex2 * ex2 + ey2 * ey2);
-    		subsamples_e2[isub].push_back(e2);
+			if (do_roots_n2 || do_cumulants_n2) {
+    			subsamples_e2[isub].push_back(e2);
+			}
+			if (do_theta_n2) {
+				all_e2.push_back(e2);
+			}
 		}
 		
-		if (do_roots_n3 || do_cumulants_n3) {
+		if (do_roots_n3 || do_cumulants_n3 || do_theta_n3) {
 		    double ex3 = event->Get_epsilonx(3);
 		    double ey3 = event->Get_epsilony(3);
 		    double e3 = std::sqrt(ex3 * ex3 + ey3 * ey3);
-    		subsamples_e3[isub].push_back(e3);
+			if (do_roots_n3 || do_cumulants_n3) {
+    			subsamples_e3[isub].push_back(e3);
+			}
+			if (do_theta_n3) {
+				all_e3.push_back(e3);
+			}
 		}
 
 		// e2_list.push_back(e2); //Not needed anymore!
 
 	}
 	
-	
+	std::filesystem::create_directories(output_folder);
+	std::vector<double> theta_coeffs_n2;
+	std::vector<double> theta_coeffs_n3;
+
+	if (do_theta_n2) {
+		std::cout << "Scanning theta estimate for n=2\n";
+		const auto scan = ScanLogAbsG(all_e2, theta_k_max, theta_dk);
+		const auto fit = FitThetaPolynomial(scan, theta_degree);
+		WriteThetaOutputs(output_folder, "n2", scan, fit);
+		if (fit.ok) {
+			theta_coeffs_n2 = fit.coeffs;
+			std::cout << "Using fitted theta(k) for n=2 root search\n";
+		} else {
+			std::cout << "Theta fit for n=2 failed; root search will use raw G(k)\n";
+		}
+	}
+
+	if (do_theta_n3) {
+		std::cout << "Scanning theta estimate for n=3\n";
+		const auto scan = ScanLogAbsG(all_e3, theta_k_max, theta_dk);
+		const auto fit = FitThetaPolynomial(scan, theta_degree);
+		WriteThetaOutputs(output_folder, "n3", scan, fit);
+		if (fit.ok) {
+			theta_coeffs_n3 = fit.coeffs;
+			std::cout << "Using fitted theta(k) for n=3 root search\n";
+		} else {
+			std::cout << "Theta fit for n=3 failed; root search will use raw G(k)\n";
+		}
+	}
+	const std::vector<double>* theta_for_roots_n2 =
+		theta_coeffs_n2.empty() ? nullptr : &theta_coeffs_n2;
+	const std::vector<double>* theta_for_roots_n3 =
+		theta_coeffs_n3.empty() ? nullptr : &theta_coeffs_n3;
+
 	// std::mt19937 rng(12345); 
 	// std::uniform_int_distribution<int> dist(0, Nsub - 1);
 	// The seed must be change each time I run in different machines!
@@ -705,11 +1042,17 @@ void LYZ(const char* input_filename,
 		                if (do_roots_n2) {
 		                    RootResult r2 =
 		                        (root_algorithm == "hybridSJ")
-		                            ? FindComplexZero_withJacobian(e2_bootstrap, re, im)
+		                            ? FindComplexZero_withJacobian(
+		                                  e2_bootstrap,
+		                                  re,
+		                                  im,
+		                                  theta_for_roots_n2
+		                              )
 		                            : FindComplexZero_noDerivative(
 		                                  e2_bootstrap,
 		                                  re,
 		                                  im,
+		                                  theta_for_roots_n2,
 		                                  root_finder_algorithm
 		                              );
 
@@ -721,11 +1064,17 @@ void LYZ(const char* input_filename,
 		                if (do_roots_n3) {
 		                    RootResult r3 =
 		                        (root_algorithm == "hybridSJ")
-		                            ? FindComplexZero_withJacobian(e3_bootstrap, re, im)
+		                            ? FindComplexZero_withJacobian(
+		                                  e3_bootstrap,
+		                                  re,
+		                                  im,
+		                                  theta_for_roots_n3
+		                              )
 		                            : FindComplexZero_noDerivative(
 		                                  e3_bootstrap,
 		                                  re,
 		                                  im,
+		                                  theta_for_roots_n3,
 		                                  root_finder_algorithm
 		                              );
 
@@ -772,11 +1121,17 @@ void LYZ(const char* input_filename,
 		            if (do_roots_n2) {
 		                RootResult r2 =
 		                    (root_algorithm == "hybridSJ")
-		                        ? FindComplexZero_withJacobian(e2_bootstrap, re, im)
+		                        ? FindComplexZero_withJacobian(
+		                              e2_bootstrap,
+		                              re,
+		                              im,
+		                              theta_for_roots_n2
+		                          )
 		                        : FindComplexZero_noDerivative(
 		                              e2_bootstrap,
 		                              re,
 		                              im,
+		                              theta_for_roots_n2,
 		                              root_finder_algorithm
 		                          );
 
@@ -788,11 +1143,17 @@ void LYZ(const char* input_filename,
 		            if (do_roots_n3) {
 		                RootResult r3 =
 		                    (root_algorithm == "hybridSJ")
-		                        ? FindComplexZero_withJacobian(e3_bootstrap, re, im)
+		                        ? FindComplexZero_withJacobian(
+		                              e3_bootstrap,
+		                              re,
+		                              im,
+		                              theta_for_roots_n3
+		                          )
 		                        : FindComplexZero_noDerivative(
 		                              e3_bootstrap,
 		                              re,
 		                              im,
+		                              theta_for_roots_n3,
 		                              root_finder_algorithm
 		                          );
 

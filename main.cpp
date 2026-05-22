@@ -33,6 +33,12 @@ struct LYZParameters {
 	
 	bool do_cumulants_n2 = true;
 	bool do_cumulants_n3 = false;
+
+    bool do_theta_n2 = false;
+    bool do_theta_n3 = false;
+    double theta_k_max = 200.0;
+    double theta_dk = 0.25;
+    int theta_degree = 4;
 	
 };
 
@@ -186,7 +192,32 @@ int main(int argc, char* argv[])
 			("do-cumulants-n3",
 				 po::value<bool>(&par.do_cumulants_n3)
 				     ->default_value(par.do_cumulants_n3),
-				 "Calculate and save n=3 cumulants");
+				 "Calculate and save n=3 cumulants")
+
+            ("do-theta-n2",
+                 po::value<bool>(&par.do_theta_n2)
+                     ->default_value(par.do_theta_n2),
+                 "Scan G_2(k), find log|G_2(k)| peaks, and fit theta_2(k)")
+
+            ("do-theta-n3",
+                 po::value<bool>(&par.do_theta_n3)
+                     ->default_value(par.do_theta_n3),
+                 "Scan G_3(k), find log|G_3(k)| peaks, and fit theta_3(k)")
+
+            ("theta-k-max",
+                 po::value<double>(&par.theta_k_max)
+                     ->default_value(par.theta_k_max),
+                 "Maximum real k used for the theta(k) scan")
+
+            ("theta-dk",
+                 po::value<double>(&par.theta_dk)
+                     ->default_value(par.theta_dk),
+                 "Real-k step size used for the theta(k) scan")
+
+            ("theta-degree",
+                 po::value<int>(&par.theta_degree)
+                     ->default_value(par.theta_degree),
+                 "Polynomial degree used to fit theta(k) from log|G(k)| peaks");
 
         po::variables_map vm;
 
@@ -215,6 +246,18 @@ int main(int argc, char* argv[])
 
                 for (const auto& arg : root_start_point_args) {
                     par.root_start_points.push_back(ParseRootStartPoint(arg));
+                }
+
+                if (par.theta_k_max <= 0.0) {
+                    throw std::runtime_error("--theta-k-max must be positive.");
+                }
+
+                if (par.theta_dk <= 0.0) {
+                    throw std::runtime_error("--theta-dk must be positive.");
+                }
+
+                if (par.theta_degree < 0) {
+                    throw std::runtime_error("--theta-degree must be non-negative.");
                 }
 
 		        LYZ(
