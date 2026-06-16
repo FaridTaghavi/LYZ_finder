@@ -1,0 +1,2208 @@
+#include <TROOT.h>
+#include <TStyle.h>
+#include <TRandom3.h>
+#include <TGraph.h>
+#include <TCanvas.h>
+#include <TLegend.h>
+#include <TAxis.h>
+#include <TMath.h>
+#include <TError.h>
+
+#include <Math/GSLMultiRootFinder.h>
+#include <Math/IFunction.h>
+#include <gsl/gsl_errno.h>
+#include <gsl/gsl_eigen.h>
+#include <omp.h>
+
+#include <iostream>
+#include <iomanip>
+#include <fstream>
+#include <vector>
+#include <complex>
+#include <cmath>
+#include <algorithm>
+#include <chrono>
+#include <limits>
+#include <stdexcept>
+#include <string>
+#include <sstream>
+#include <utility>
+
+using cd = std::complex<double>;
+
+struct TriangleGConfig {
+    double a = 0.04;
+    double b = 0.15;
+
+    int M = 300;
+    int Nevents = 2000000;
+    int Nsub = 30;
+    int Nresam = 100;
+    int ncore = 1;
+    int q_bins = 20000;
+    int nonflow_q = 0;
+    int nonflow_groups = -1;
+    int M_nonflow = -1;
+    std::string generating_function = "exponential";
+    int modified_gl_nodes = 8;
+
+    int n = 2;
+    double theta = M_PI / 3.0;
+
+    double root_start_re = 0.175344;
+    double root_start_im = 0.0542001;
+    std::vector<std::pair<double, double>> root_start_points;
+
+    unsigned int seed = 0;
+    unsigned int bootstrap_seed = 12345;
+
+    std::string nominal_output = "MC_generating_roots.dat";
+    std::string bootstrap_output = "MC_generating_roots_bootstrap.dat";
+    std::string correlations_output = "correlations_2_4.dat";
+};
+
+void PrintTriangleGUsage(const char* program)
+{
+    std::cout
+        << "Usage: " << program << " [options]\n\n"
+        << "Options:\n"
+        << "  --a VALUE                    Triangle mode parameter a\n"
+        << "  --b VALUE                    Triangle max parameter b\n"
+        << "  --M VALUE                    Number of particles per event\n"
+        << "  --N VALUE                    Number of generated events\n"
+        << "  --Nevents VALUE              Same as --N\n"
+        << "  --Nresam VALUE               Number of bootstrap resamples\n"
+        << "  --Nsub VALUE                 Number of Q subsamples for bootstrap\n"
+        << "  --ncore VALUE                Number of OpenMP threads\n"
+        << "  --q-bins VALUE               Bins for weighted Q root search; 0 is exact\n"
+        << "  --M-nonflow VALUE            Total copied uniform nonflow multiplicity; default M\n"
+        << "  --nonflow-q VALUE            Copy count q for uniform nonflow particles; 0 off\n"
+        << "  --nonflow-groups VALUE       Independent nonflow particles; default M/q\n"
+        << "  --generating-function VALUE  Zero definition: exponential, product, modified, both, or all\n"
+        << "  --modified-gl-nodes VALUE    N_GL nodes used for the equation-18 modified product\n"
+        << "  --root-start-re VALUE        Initial Re(k) for root search\n"
+        << "  --root-start-im VALUE        Initial Im(k) for root search\n"
+        << "  --root-start-point RE,IM     Initial guess; can be repeated\n"
+        << "  --n VALUE                    Harmonic n used in Q_n(theta)\n"
+        << "  --theta VALUE                Reference angle theta\n"
+        << "  --seed VALUE                 Event-generation RNG seed\n"
+        << "  --bootstrap-seed VALUE       Bootstrap RNG seed\n"
+        << "  --nominal-output FILE        Nominal root output file\n"
+        << "  --bootstrap-output FILE      Bootstrap roots output file\n"
+        << "  --correlations-output FILE   Event-level <2> and <4> output file\n"
+        << "  --help                       Print this help\n";
+}
+
+TriangleGConfig ParseTriangleGArgs(int argc, char** argv)
+{
+    TriangleGConfig cfg;
+
+    auto require_value = [&](int& i, const std::string& option) -> std::string {
+        if(i + 1 >= argc)
+            throw std::runtime_error("Missing value for " + option);
+        return argv[++i];
+    };
+
+    auto parse_root_start_point = [](const std::string& text) {
+        std::string normalized = text;
+        for(char& c : normalized) {
+            if(c == ':' || c == ';')
+                c = ',';
+        }
+
+        std::stringstream ss(normalized);
+        std::string re_text;
+        std::string im_text;
+
+        if(!std::getline(ss, re_text, ',') ||
+           !std::getline(ss, im_text, ',') ||
+           re_text.empty() ||
+           im_text.empty()) {
+            throw std::runtime_error(
+                "Invalid --root-start-point '" + text + "'. Use RE,IM."
+            );
+        }
+
+        std::string extra;
+        if(std::getline(ss, extra, ',')) {
+            throw std::runtime_error(
+                "Invalid --root-start-point '" + text + "'. Use exactly RE,IM."
+            );
+        }
+
+        return std::make_pair(std::stod(re_text), std::stod(im_text));
+    };
+
+    for(int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+
+        if(arg == "--help" || arg == "-h") {
+            PrintTriangleGUsage(argv[0]);
+            std::exit(0);
+        } else if(arg == "--a") {
+            cfg.a = std::stod(require_value(i, arg));
+        } else if(arg == "--b") {
+            cfg.b = std::stod(require_value(i, arg));
+        } else if(arg == "--M") {
+            cfg.M = std::stoi(require_value(i, arg));
+        } else if(arg == "--N" || arg == "--Nevents") {
+            cfg.Nevents = std::stoi(require_value(i, arg));
+        } else if(arg == "--Nresam") {
+            cfg.Nresam = std::stoi(require_value(i, arg));
+        } else if(arg == "--Nsub") {
+            cfg.Nsub = std::stoi(require_value(i, arg));
+        } else if(arg == "--ncore") {
+            cfg.ncore = std::stoi(require_value(i, arg));
+        } else if(arg == "--q-bins") {
+            cfg.q_bins = std::stoi(require_value(i, arg));
+        } else if(arg == "--M-nonflow" || arg == "--N-nonflow") {
+            cfg.M_nonflow = std::stoi(require_value(i, arg));
+        } else if(arg == "--nonflow-q") {
+            cfg.nonflow_q = std::stoi(require_value(i, arg));
+        } else if(arg == "--nonflow-groups") {
+            cfg.nonflow_groups = std::stoi(require_value(i, arg));
+        } else if(arg == "--generating-function") {
+            cfg.generating_function = require_value(i, arg);
+            if(cfg.generating_function == "exp")
+                cfg.generating_function = "exponential";
+        } else if(arg == "--modified-gl-nodes") {
+            cfg.modified_gl_nodes = std::stoi(require_value(i, arg));
+        } else if(arg == "--root-start-re") {
+            cfg.root_start_re = std::stod(require_value(i, arg));
+        } else if(arg == "--root-start-im") {
+            cfg.root_start_im = std::stod(require_value(i, arg));
+        } else if(arg == "--root-start-point") {
+            cfg.root_start_points.push_back(
+                parse_root_start_point(require_value(i, arg))
+            );
+        } else if(arg == "--n") {
+            cfg.n = std::stoi(require_value(i, arg));
+        } else if(arg == "--theta") {
+            cfg.theta = std::stod(require_value(i, arg));
+        } else if(arg == "--seed") {
+            cfg.seed = static_cast<unsigned int>(std::stoul(require_value(i, arg)));
+        } else if(arg == "--bootstrap-seed") {
+            cfg.bootstrap_seed =
+                static_cast<unsigned int>(std::stoul(require_value(i, arg)));
+        } else if(arg == "--nominal-output") {
+            cfg.nominal_output = require_value(i, arg);
+        } else if(arg == "--bootstrap-output") {
+            cfg.bootstrap_output = require_value(i, arg);
+        } else if(arg == "--correlations-output" || arg == "--q-vector-output") {
+            cfg.correlations_output = require_value(i, arg);
+        } else {
+            throw std::runtime_error("Unknown option: " + arg);
+        }
+    }
+
+    if(cfg.a <= 0.0) throw std::runtime_error("--a must be positive");
+    if(cfg.b <= cfg.a) throw std::runtime_error("--b must be larger than --a");
+    if(cfg.M <= 0) throw std::runtime_error("--M must be positive");
+    if(cfg.Nevents <= 0) throw std::runtime_error("--N/--Nevents must be positive");
+    if(cfg.Nsub <= 0) throw std::runtime_error("--Nsub must be positive");
+    if(cfg.Nresam < 0) throw std::runtime_error("--Nresam must be non-negative");
+    if(cfg.ncore <= 0) throw std::runtime_error("--ncore must be positive");
+    if(cfg.q_bins < 0) throw std::runtime_error("--q-bins must be non-negative");
+    if(cfg.M_nonflow < -1)
+        throw std::runtime_error("--M-nonflow must be -1 or non-negative");
+    if(cfg.nonflow_q < 0) throw std::runtime_error("--nonflow-q must be non-negative");
+    if(cfg.nonflow_groups < -1)
+        throw std::runtime_error("--nonflow-groups must be -1 or non-negative");
+    if(cfg.generating_function != "exponential" &&
+       cfg.generating_function != "product" &&
+       cfg.generating_function != "modified" &&
+       cfg.generating_function != "both" &&
+       cfg.generating_function != "all") {
+        throw std::runtime_error(
+            "--generating-function must be one of: exponential, product, modified, both, all"
+        );
+    }
+    if(cfg.modified_gl_nodes <= 0)
+        throw std::runtime_error("--modified-gl-nodes must be positive");
+    if(cfg.nonflow_q == 0 && (cfg.nonflow_groups > 0 || cfg.M_nonflow > 0))
+        throw std::runtime_error("--nonflow-groups or --M-nonflow requires --nonflow-q > 0");
+    if(cfg.M_nonflow >= 0 && cfg.nonflow_groups >= 0)
+        throw std::runtime_error("Use only one of --M-nonflow or --nonflow-groups");
+    if(cfg.nonflow_q > 0 && cfg.M_nonflow > 0 && cfg.M_nonflow % cfg.nonflow_q != 0) {
+        throw std::runtime_error("--M-nonflow must be divisible by --nonflow-q");
+    }
+    if(cfg.nonflow_q > 0 &&
+       cfg.M_nonflow < 0 &&
+       cfg.nonflow_groups < 0 &&
+       cfg.M % cfg.nonflow_q != 0) {
+        throw std::runtime_error(
+            "Default nonflow groups M/q requires M divisible by --nonflow-q. "
+            "Use --M-nonflow or --nonflow-groups to set it explicitly."
+        );
+    }
+    if(cfg.n <= 0) throw std::runtime_error("--n must be positive");
+
+    if(cfg.root_start_points.empty())
+        cfg.root_start_points.push_back({cfg.root_start_re, cfg.root_start_im});
+
+    return cfg;
+}
+
+struct MCGSample {
+    std::vector<double> q;
+    std::vector<double> weight;
+    double total_weight = 0.0;
+};
+
+struct QBinLayout {
+    int bins = 0;
+    double q_min = 0.0;
+    double q_max = 0.0;
+    double width = 0.0;
+};
+
+struct MCGValue {
+    cd G = {0.0, 0.0};
+    cd dGdk = {0.0, 0.0};
+};
+
+struct ProductGSample {
+    std::vector<cd> coeffs;
+    double total_weight = 0.0;
+};
+
+QBinLayout BuildQBinLayout(int bins, int M)
+{
+    QBinLayout layout;
+    layout.bins = bins;
+    layout.q_min = -static_cast<double>(M);
+    layout.q_max = static_cast<double>(M);
+    layout.width =
+        (layout.bins > 0)
+            ? (layout.q_max - layout.q_min) / static_cast<double>(layout.bins)
+            : 0.0;
+    return layout;
+}
+
+int QBinIndex(double q, const QBinLayout& layout)
+{
+    int ibin = static_cast<int>((q - layout.q_min) / layout.width);
+    if(ibin < 0) ibin = 0;
+    if(ibin >= layout.bins) ibin = layout.bins - 1;
+    return ibin;
+}
+
+MCGSample BuildExactQSample(const std::vector<double>& Q)
+{
+    MCGSample sample;
+    sample.q = Q;
+    sample.weight.assign(Q.size(), 1.0);
+    sample.total_weight = static_cast<double>(Q.size());
+    return sample;
+}
+
+MCGSample BuildBinnedQSample(
+    const std::vector<double>& Q,
+    const QBinLayout& layout
+)
+{
+    std::vector<double> bin_weights(static_cast<std::size_t>(layout.bins), 0.0);
+
+    for(double q : Q)
+        bin_weights[static_cast<std::size_t>(QBinIndex(q, layout))] += 1.0;
+
+    MCGSample sample;
+    sample.q.reserve(static_cast<std::size_t>(layout.bins));
+    sample.weight.reserve(static_cast<std::size_t>(layout.bins));
+    sample.total_weight = static_cast<double>(Q.size());
+
+    for(int ibin = 0; ibin < layout.bins; ++ibin) {
+        const double weight = bin_weights[static_cast<std::size_t>(ibin)];
+        if(weight == 0.0) continue;
+
+        const double q_center =
+            layout.q_min + (static_cast<double>(ibin) + 0.5) * layout.width;
+
+        sample.q.push_back(q_center);
+        sample.weight.push_back(weight);
+    }
+
+    return sample;
+}
+
+MCGSample BuildQSample(
+    const std::vector<double>& Q,
+    const QBinLayout& layout
+)
+{
+    return (layout.bins > 0)
+        ? BuildBinnedQSample(Q, layout)
+        : BuildExactQSample(Q);
+}
+
+MCGValue EvaluateMCGeneratingFunction(
+    cd k,
+    const MCGSample& sample
+)
+{
+    MCGValue value;
+    if(sample.total_weight <= 0.0) return value;
+
+    cd sum = 0.0;
+    cd derivative_sum = 0.0;
+    const cd I(0.0, 1.0);
+
+    for(std::size_t i = 0; i < sample.q.size(); ++i) {
+        const double q = sample.q[i];
+        const double weight = sample.weight[i];
+        const cd exponential = std::exp(I * k * q);
+
+        sum += weight * exponential;
+        derivative_sum += weight * I * q * exponential;
+    }
+
+    value.G = sum / sample.total_weight;
+    value.dGdk = derivative_sum / sample.total_weight;
+    return value;
+}
+
+class MCGCachedEvaluator {
+public:
+    explicit MCGCachedEvaluator(const MCGSample& sample)
+        : sample_(sample) {}
+
+    const MCGValue& Eval(const double* x) const {
+        if(!cache_valid_ || x[0] != last_re_ || x[1] != last_im_) {
+            last_re_ = x[0];
+            last_im_ = x[1];
+            cached_value_ =
+                EvaluateMCGeneratingFunction(cd(last_re_, last_im_), sample_);
+            cache_valid_ = true;
+        }
+
+        return cached_value_;
+    }
+
+private:
+    const MCGSample& sample_;
+    mutable bool cache_valid_ = false;
+    mutable double last_re_ = 0.0;
+    mutable double last_im_ = 0.0;
+    mutable MCGValue cached_value_;
+};
+
+struct RootResult {
+    bool ok = false;
+    int status = -999;
+    cd k = {NAN, NAN};
+    cd F = {NAN, NAN};
+    double time_ms = 0.0;
+};
+
+struct ReMCG {
+    const MCGSample& sample;
+
+    explicit ReMCG(const MCGSample& values)
+        : sample(values) {}
+
+    double operator()(const double* x) const {
+        return std::real(
+            EvaluateMCGeneratingFunction(cd(x[0], x[1]), sample).G
+        );
+    }
+};
+
+struct ImMCG {
+    const MCGSample& sample;
+
+    explicit ImMCG(const MCGSample& values)
+        : sample(values) {}
+
+    double operator()(const double* x) const {
+        return std::imag(
+            EvaluateMCGeneratingFunction(cd(x[0], x[1]), sample).G
+        );
+    }
+};
+
+class ReMCGGrad : public ROOT::Math::IGradientFunctionMultiDim {
+public:
+    explicit ReMCGGrad(const MCGCachedEvaluator& evaluator)
+        : evaluator_(&evaluator) {}
+
+    unsigned int NDim() const override { return 2; }
+
+    ROOT::Math::IBaseFunctionMultiDim* Clone() const override {
+        return new ReMCGGrad(*this);
+    }
+
+private:
+    double DoEval(const double* x) const override {
+        return std::real(evaluator_->Eval(x).G);
+    }
+
+    double DoDerivative(const double* x, unsigned int icoord) const override {
+        cd dGdk = evaluator_->Eval(x).dGdk;
+        return (icoord == 0) ? std::real(dGdk) : -std::imag(dGdk);
+    }
+
+    const MCGCachedEvaluator* evaluator_;
+};
+
+class ImMCGGrad : public ROOT::Math::IGradientFunctionMultiDim {
+public:
+    explicit ImMCGGrad(const MCGCachedEvaluator& evaluator)
+        : evaluator_(&evaluator) {}
+
+    unsigned int NDim() const override { return 2; }
+
+    ROOT::Math::IBaseFunctionMultiDim* Clone() const override {
+        return new ImMCGGrad(*this);
+    }
+
+private:
+    double DoEval(const double* x) const override {
+        return std::imag(evaluator_->Eval(x).G);
+    }
+
+    double DoDerivative(const double* x, unsigned int icoord) const override {
+        cd dGdk = evaluator_->Eval(x).dGdk;
+        return (icoord == 0) ? std::imag(dGdk) : std::real(dGdk);
+    }
+
+    const MCGCachedEvaluator* evaluator_;
+};
+
+RootResult FindMCGeneratingZero(
+    const MCGSample& sample,
+    double x0_re,
+    double x0_im,
+    bool use_jacobian = true
+)
+{
+    RootResult result;
+
+    try {
+        auto t1 = std::chrono::high_resolution_clock::now();
+
+        if(use_jacobian) {
+            ROOT::Math::GSLMultiRootFinder finder(
+                ROOT::Math::GSLMultiRootFinder::kHybridSJ
+            );
+
+            MCGCachedEvaluator evaluator(sample);
+            ReMCGGrad f_re(evaluator);
+            ImMCGGrad f_im(evaluator);
+            finder.AddFunction(f_re);
+            finder.AddFunction(f_im);
+
+            double x0[2] = {x0_re, x0_im};
+            bool ok = finder.Solve(x0, 1000, 1e-10, 1e-10);
+
+            const double* root = finder.X();
+            const double* fval = finder.FVal();
+
+            result.ok = ok;
+            result.status = finder.Status();
+            if(root && fval) {
+                result.k = {root[0], root[1]};
+                result.F = {fval[0], fval[1]};
+            }
+        } else {
+            ROOT::Math::GSLMultiRootFinder finder(
+                ROOT::Math::GSLMultiRootFinder::kHybridS
+            );
+
+            ReMCG f_re(sample);
+            ImMCG f_im(sample);
+            finder.AddFunction(f_re, 2);
+            finder.AddFunction(f_im, 2);
+
+            double x0[2] = {x0_re, x0_im};
+            bool ok = finder.Solve(x0, 1000, 1e-10, 1e-10);
+
+            const double* root = finder.X();
+            const double* fval = finder.FVal();
+
+            result.ok = ok;
+            result.status = finder.Status();
+            if(root && fval) {
+                result.k = {root[0], root[1]};
+                result.F = {fval[0], fval[1]};
+            }
+        }
+
+        auto t2 = std::chrono::high_resolution_clock::now();
+        result.time_ms =
+            std::chrono::duration<double, std::milli>(t2 - t1).count();
+    }
+    catch(const std::exception&) {
+        result.ok = false;
+        result.status = -999;
+    }
+
+    return result;
+}
+
+bool IsGoodMCGRoot(const RootResult& r, double max_root_size)
+{
+    if(!r.ok) return false;
+    if(r.status != 0) return false;
+    if(!std::isfinite(r.k.real()) || !std::isfinite(r.k.imag())) return false;
+    if(std::abs(r.F) > 1e-6) return false;
+    if(r.k.real() < -1e-8 || r.k.imag() < -1e-8) return false;
+    if(std::abs(r.k) > max_root_size) return false;
+    return true;
+}
+
+std::vector<RootResult> FindMCGeneratingZerosOnGrid(
+    const MCGSample& sample,
+    double re_min,
+    double re_max,
+    double dre,
+    double im_min,
+    double im_max,
+    double dim,
+    bool use_jacobian = true
+)
+{
+    std::vector<RootResult> roots;
+    const double max_root_size =
+        2.0 * std::sqrt(re_max * re_max + im_max * im_max);
+
+    for(double re = re_min; re <= re_max + 0.5 * dre; re += dre) {
+        for(double im = im_min; im <= im_max + 0.5 * dim; im += dim) {
+            RootResult r = FindMCGeneratingZero(sample, re, im, use_jacobian);
+            if(IsGoodMCGRoot(r, max_root_size))
+                roots.push_back(r);
+        }
+    }
+
+    const double duplicate_tol = 1e-6;
+    std::vector<RootResult> unique_roots;
+
+    for(const auto& r : roots) {
+        bool duplicate = false;
+        for(const auto& u : unique_roots) {
+            if(std::abs(r.k - u.k) < duplicate_tol) {
+                duplicate = true;
+                break;
+            }
+        }
+
+        if(!duplicate)
+            unique_roots.push_back(r);
+    }
+
+    std::sort(
+        unique_roots.begin(),
+        unique_roots.end(),
+        [](const RootResult& a, const RootResult& b) {
+            return std::abs(a.k) < std::abs(b.k);
+        }
+    );
+
+    return unique_roots;
+}
+
+std::vector<RootResult> FindMCGeneratingZerosFromStarts(
+    const MCGSample& sample,
+    const std::vector<std::pair<double, double>>& start_points,
+    bool use_jacobian = true
+)
+{
+    std::vector<RootResult> roots;
+
+    double max_root_size = 0.0;
+    for(const auto& p : start_points) {
+        max_root_size = std::max(
+            max_root_size,
+            std::sqrt(p.first * p.first + p.second * p.second)
+        );
+    }
+    max_root_size *= 2.0;
+    if(max_root_size <= 0.0)
+        max_root_size = std::numeric_limits<double>::infinity();
+
+    for(const auto& p : start_points) {
+        RootResult r = FindMCGeneratingZero(sample, p.first, p.second, use_jacobian);
+        if(IsGoodMCGRoot(r, max_root_size))
+            roots.push_back(r);
+    }
+
+    const double duplicate_tol = 1e-6;
+    std::vector<RootResult> unique_roots;
+
+    for(const auto& r : roots) {
+        bool duplicate = false;
+        for(const auto& u : unique_roots) {
+            if(std::abs(r.k - u.k) < duplicate_tol) {
+                duplicate = true;
+                break;
+            }
+        }
+
+        if(!duplicate)
+            unique_roots.push_back(r);
+    }
+
+    std::sort(
+        unique_roots.begin(),
+        unique_roots.end(),
+        [](const RootResult& a, const RootResult& b) {
+            return std::abs(a.k) < std::abs(b.k);
+        }
+    );
+
+    return unique_roots;
+}
+
+std::vector<cd> BuildProductCoefficients(
+    int n,
+    double theta,
+    const std::vector<double>& phiEvent
+)
+{
+    std::vector<cd> coeffs;
+    coeffs.reserve(phiEvent.size() + 1);
+    coeffs.push_back(cd(1.0, 0.0));
+
+    for(double phi : phiEvent) {
+        const cd factor(0.0, std::cos(n * (phi - theta)));
+        coeffs.push_back(cd(0.0, 0.0));
+
+        for(std::size_t m = coeffs.size() - 1; m > 0; --m)
+            coeffs[m] += coeffs[m - 1] * factor;
+    }
+
+    return coeffs;
+}
+
+std::vector<double> BuildModifiedProductFactors(int multiplicity, int gl_nodes)
+{
+    // Golub-Welsch quadrature for x^M exp(-x)/M!, obtained from x = M y
+    // in Eq. (18). The normalized quadrature weights are v_0^2.
+    gsl_matrix* jacobi = gsl_matrix_calloc(gl_nodes, gl_nodes);
+    gsl_vector* eigenvalues = gsl_vector_alloc(gl_nodes);
+    gsl_matrix* eigenvectors = gsl_matrix_alloc(gl_nodes, gl_nodes);
+    gsl_eigen_symmv_workspace* workspace = gsl_eigen_symmv_alloc(gl_nodes);
+
+    if(!jacobi || !eigenvalues || !eigenvectors || !workspace)
+        throw std::runtime_error("Failed to allocate generalized Laguerre quadrature");
+
+    const double alpha = static_cast<double>(multiplicity);
+    for(int i = 0; i < gl_nodes; ++i) {
+        gsl_matrix_set(jacobi, i, i, 2.0 * i + 1.0 + alpha);
+        if(i + 1 < gl_nodes) {
+            const double off_diagonal =
+                std::sqrt((i + 1.0) * (i + 1.0 + alpha));
+            gsl_matrix_set(jacobi, i, i + 1, off_diagonal);
+            gsl_matrix_set(jacobi, i + 1, i, off_diagonal);
+        }
+    }
+
+    const int status =
+        gsl_eigen_symmv(jacobi, eigenvalues, eigenvectors, workspace);
+    if(status != GSL_SUCCESS) {
+        gsl_eigen_symmv_free(workspace);
+        gsl_matrix_free(eigenvectors);
+        gsl_vector_free(eigenvalues);
+        gsl_matrix_free(jacobi);
+        throw std::runtime_error("Failed to compute generalized Laguerre quadrature");
+    }
+    gsl_eigen_symmv_sort(eigenvalues, eigenvectors, GSL_EIGEN_SORT_VAL_ASC);
+
+    std::vector<double> factors(
+        static_cast<std::size_t>(multiplicity + 1),
+        0.0
+    );
+    for(int inode = 0; inode < gl_nodes; ++inode) {
+        const double x = gsl_vector_get(eigenvalues, inode);
+        const double first_component = gsl_matrix_get(eigenvectors, 0, inode);
+        const double normalized_weight = first_component * first_component;
+        const double scale = static_cast<double>(multiplicity) / x;
+        double scale_power = 1.0;
+
+        for(int order = 0; order <= multiplicity; ++order) {
+            factors[static_cast<std::size_t>(order)] +=
+                normalized_weight * scale_power;
+            scale_power *= scale;
+        }
+    }
+
+    gsl_eigen_symmv_free(workspace);
+    gsl_matrix_free(eigenvectors);
+    gsl_vector_free(eigenvalues);
+    gsl_matrix_free(jacobi);
+    return factors;
+}
+
+std::vector<cd> BuildModifiedProductCoefficients(
+    const std::vector<cd>& product_coeffs,
+    const std::vector<double>& modified_factors
+)
+{
+    std::vector<cd> coeffs = product_coeffs;
+    if(coeffs.size() != modified_factors.size())
+        throw std::runtime_error("Modified-product factor size does not match multiplicity");
+
+    for(std::size_t order = 0; order < coeffs.size(); ++order)
+        coeffs[order] *= modified_factors[order];
+
+    return coeffs;
+}
+
+void AddProductCoefficients(
+    std::vector<cd>& sum_coeffs,
+    const std::vector<cd>& event_coeffs
+)
+{
+    for(std::size_t i = 0; i < event_coeffs.size(); ++i)
+        sum_coeffs[i] += event_coeffs[i];
+}
+
+ProductGSample BuildProductSampleFromSubsamples(
+    const std::vector<std::vector<cd>>& subsample_coeff_sums,
+    const std::vector<double>& subsample_counts
+)
+{
+    ProductGSample sample;
+    if(subsample_coeff_sums.empty())
+        return sample;
+
+    sample.coeffs.assign(subsample_coeff_sums.front().size(), cd(0.0, 0.0));
+
+    for(std::size_t isub = 0; isub < subsample_coeff_sums.size(); ++isub) {
+        for(std::size_t icoeff = 0; icoeff < sample.coeffs.size(); ++icoeff)
+            sample.coeffs[icoeff] += subsample_coeff_sums[isub][icoeff];
+
+        sample.total_weight += subsample_counts[isub];
+    }
+
+    if(sample.total_weight > 0.0) {
+        for(cd& coeff : sample.coeffs)
+            coeff /= sample.total_weight;
+    }
+
+    return sample;
+}
+
+ProductGSample BootstrapProductSampleFromSubsamples(
+    const std::vector<std::vector<cd>>& subsample_coeff_sums,
+    const std::vector<double>& subsample_counts,
+    TRandom3& rng
+)
+{
+    ProductGSample sample;
+    if(subsample_coeff_sums.empty())
+        return sample;
+
+    sample.coeffs.assign(subsample_coeff_sums.front().size(), cd(0.0, 0.0));
+    const int Nsub = static_cast<int>(subsample_coeff_sums.size());
+
+    for(int isub = 0; isub < Nsub; ++isub) {
+        const int pick = rng.Integer(Nsub);
+        const auto& picked_coeffs =
+            subsample_coeff_sums[static_cast<std::size_t>(pick)];
+
+        for(std::size_t icoeff = 0; icoeff < sample.coeffs.size(); ++icoeff)
+            sample.coeffs[icoeff] += picked_coeffs[icoeff];
+
+        sample.total_weight +=
+            subsample_counts[static_cast<std::size_t>(pick)];
+    }
+
+    if(sample.total_weight > 0.0) {
+        for(cd& coeff : sample.coeffs)
+            coeff /= sample.total_weight;
+    }
+
+    return sample;
+}
+
+MCGValue EvaluateProductGeneratingFunction(
+    cd z,
+    const ProductGSample& sample
+)
+{
+    MCGValue value;
+    if(sample.coeffs.empty() || sample.total_weight <= 0.0)
+        return value;
+
+    cd polynomial = sample.coeffs.back();
+    cd derivative = cd(0.0, 0.0);
+
+    for(std::size_t idx = sample.coeffs.size() - 1; idx > 0; --idx) {
+        derivative = derivative * z + polynomial;
+        polynomial = polynomial * z + sample.coeffs[idx - 1];
+    }
+
+    value.G = polynomial;
+    value.dGdk = derivative;
+    return value;
+}
+
+class ProductGCachedEvaluator {
+public:
+    explicit ProductGCachedEvaluator(const ProductGSample& sample)
+        : sample_(sample) {}
+
+    const MCGValue& Eval(const double* x) const {
+        if(!cache_valid_ || x[0] != last_re_ || x[1] != last_im_) {
+            last_re_ = x[0];
+            last_im_ = x[1];
+            cached_value_ =
+                EvaluateProductGeneratingFunction(cd(last_re_, last_im_), sample_);
+            cache_valid_ = true;
+        }
+
+        return cached_value_;
+    }
+
+private:
+    const ProductGSample& sample_;
+    mutable bool cache_valid_ = false;
+    mutable double last_re_ = 0.0;
+    mutable double last_im_ = 0.0;
+    mutable MCGValue cached_value_;
+};
+
+class ReProductGGrad : public ROOT::Math::IGradientFunctionMultiDim {
+public:
+    explicit ReProductGGrad(const ProductGCachedEvaluator& evaluator)
+        : evaluator_(&evaluator) {}
+
+    unsigned int NDim() const override { return 2; }
+
+    ROOT::Math::IBaseFunctionMultiDim* Clone() const override {
+        return new ReProductGGrad(*this);
+    }
+
+private:
+    double DoEval(const double* x) const override {
+        return std::real(evaluator_->Eval(x).G);
+    }
+
+    double DoDerivative(const double* x, unsigned int icoord) const override {
+        cd dGdz = evaluator_->Eval(x).dGdk;
+        return (icoord == 0) ? std::real(dGdz) : -std::imag(dGdz);
+    }
+
+    const ProductGCachedEvaluator* evaluator_;
+};
+
+class ImProductGGrad : public ROOT::Math::IGradientFunctionMultiDim {
+public:
+    explicit ImProductGGrad(const ProductGCachedEvaluator& evaluator)
+        : evaluator_(&evaluator) {}
+
+    unsigned int NDim() const override { return 2; }
+
+    ROOT::Math::IBaseFunctionMultiDim* Clone() const override {
+        return new ImProductGGrad(*this);
+    }
+
+private:
+    double DoEval(const double* x) const override {
+        return std::imag(evaluator_->Eval(x).G);
+    }
+
+    double DoDerivative(const double* x, unsigned int icoord) const override {
+        cd dGdz = evaluator_->Eval(x).dGdk;
+        return (icoord == 0) ? std::imag(dGdz) : std::real(dGdz);
+    }
+
+    const ProductGCachedEvaluator* evaluator_;
+};
+
+RootResult FindProductGeneratingZero(
+    const ProductGSample& sample,
+    double x0_re,
+    double x0_im
+)
+{
+    RootResult result;
+
+    try {
+        auto t1 = std::chrono::high_resolution_clock::now();
+
+        ROOT::Math::GSLMultiRootFinder finder(
+            ROOT::Math::GSLMultiRootFinder::kHybridSJ
+        );
+
+        ProductGCachedEvaluator evaluator(sample);
+        ReProductGGrad f_re(evaluator);
+        ImProductGGrad f_im(evaluator);
+        finder.AddFunction(f_re);
+        finder.AddFunction(f_im);
+
+        double x0[2] = {x0_re, x0_im};
+        bool ok = finder.Solve(x0, 1000, 1e-10, 1e-10);
+
+        const double* root = finder.X();
+        const double* fval = finder.FVal();
+
+        result.ok = ok;
+        result.status = finder.Status();
+        if(root && fval) {
+            result.k = {root[0], root[1]};
+            result.F = {fval[0], fval[1]};
+        }
+
+        auto t2 = std::chrono::high_resolution_clock::now();
+        result.time_ms =
+            std::chrono::duration<double, std::milli>(t2 - t1).count();
+    }
+    catch(const std::exception&) {
+        result.ok = false;
+        result.status = -999;
+    }
+
+    return result;
+}
+
+std::vector<RootResult> FindProductGeneratingZerosFromStarts(
+    const ProductGSample& sample,
+    const std::vector<std::pair<double, double>>& start_points
+)
+{
+    std::vector<RootResult> roots;
+
+    double max_root_size = 0.0;
+    for(const auto& p : start_points) {
+        max_root_size = std::max(
+            max_root_size,
+            std::sqrt(p.first * p.first + p.second * p.second)
+        );
+    }
+    max_root_size *= 2.0;
+    if(max_root_size <= 0.0)
+        max_root_size = std::numeric_limits<double>::infinity();
+
+    for(const auto& p : start_points) {
+        RootResult r = FindProductGeneratingZero(sample, p.first, p.second);
+        if(IsGoodMCGRoot(r, max_root_size))
+            roots.push_back(r);
+    }
+
+    const double duplicate_tol = 1e-6;
+    std::vector<RootResult> unique_roots;
+
+    for(const auto& r : roots) {
+        bool duplicate = false;
+        for(const auto& u : unique_roots) {
+            if(std::abs(r.k - u.k) < duplicate_tol) {
+                duplicate = true;
+                break;
+            }
+        }
+
+        if(!duplicate)
+            unique_roots.push_back(r);
+    }
+
+    std::sort(
+        unique_roots.begin(),
+        unique_roots.end(),
+        [](const RootResult& a, const RootResult& b) {
+            return std::abs(a.k) < std::abs(b.k);
+        }
+    );
+
+    return unique_roots;
+}
+
+void WriteMCGeneratingRoots(
+    const std::string& filename,
+    const std::vector<RootResult>& roots
+)
+{
+    std::ofstream out(filename);
+    out << std::setprecision(17);
+    out << "# iroot  Re(k)  Im(k)  Re(G)  Im(G)  time_ms\n";
+
+    for(std::size_t i = 0; i < roots.size(); ++i) {
+        const auto& r = roots[i];
+        out << i << " "
+            << r.k.real() << " "
+            << r.k.imag() << " "
+            << r.F.real() << " "
+            << r.F.imag() << " "
+            << r.time_ms << "\n";
+    }
+}
+
+void WriteBootstrapMCGeneratingRoots(
+    const std::string& filename,
+    const std::vector<std::vector<RootResult>>& roots_from_resampling
+)
+{
+    std::ofstream out(filename);
+    out << std::setprecision(17);
+    out << "# ires  iroot  ok  status  Re(k)  Im(k)  Re(G)  Im(G)  time_ms\n";
+
+    for(std::size_t ires = 0; ires < roots_from_resampling.size(); ++ires) {
+        const auto& roots = roots_from_resampling[ires];
+
+        for(std::size_t iroot = 0; iroot < roots.size(); ++iroot) {
+            const auto& r = roots[iroot];
+            out << ires << " "
+                << iroot << " "
+                << (r.ok ? 1 : 0) << " "
+                << r.status << " "
+                << r.k.real() << " "
+                << r.k.imag() << " "
+                << r.F.real() << " "
+                << r.F.imag() << " "
+                << r.time_ms << "\n";
+        }
+    }
+}
+
+std::vector<std::vector<double>> BuildQSubsampleBins(
+    const std::vector<double>& Q,
+    int Nsub,
+    const QBinLayout& layout
+)
+{
+    std::vector<std::vector<double>> subsamples(
+        static_cast<std::size_t>(Nsub),
+        std::vector<double>(static_cast<std::size_t>(layout.bins), 0.0)
+    );
+
+    for(std::size_t i = 0; i < Q.size(); ++i) {
+        const std::size_t isub = i % static_cast<std::size_t>(Nsub);
+        const std::size_t ibin =
+            static_cast<std::size_t>(QBinIndex(Q[i], layout));
+        subsamples[isub][ibin] += 1.0;
+    }
+
+    return subsamples;
+}
+
+MCGSample BootstrapQSampleFromSubsampleBins(
+    const std::vector<std::vector<double>>& subsample_bins,
+    const QBinLayout& layout,
+    TRandom3& rng
+)
+{
+    std::vector<double> bin_weights(static_cast<std::size_t>(layout.bins), 0.0);
+
+    const int Nsub = static_cast<int>(subsample_bins.size());
+
+    for(int isub = 0; isub < Nsub; ++isub) {
+        const int pick = rng.Integer(Nsub);
+        const auto& picked_bins = subsample_bins[static_cast<std::size_t>(pick)];
+
+        for(int ibin = 0; ibin < layout.bins; ++ibin)
+            bin_weights[static_cast<std::size_t>(ibin)] +=
+                picked_bins[static_cast<std::size_t>(ibin)];
+    }
+
+    MCGSample sample;
+    sample.q.reserve(static_cast<std::size_t>(layout.bins));
+    sample.weight.reserve(static_cast<std::size_t>(layout.bins));
+
+    for(int ibin = 0; ibin < layout.bins; ++ibin) {
+        const double weight = bin_weights[static_cast<std::size_t>(ibin)];
+        if(weight == 0.0) continue;
+
+        const double q_center =
+            layout.q_min + (static_cast<double>(ibin) + 0.5) * layout.width;
+
+        sample.q.push_back(q_center);
+        sample.weight.push_back(weight);
+        sample.total_weight += weight;
+    }
+
+    return sample;
+}
+
+std::vector<std::vector<double>> BuildExactQSubsamples(
+    const std::vector<double>& Q,
+    int Nsub
+)
+{
+    std::vector<std::vector<double>> subsamples(static_cast<std::size_t>(Nsub));
+
+    for(std::size_t i = 0; i < Q.size(); ++i) {
+        const std::size_t isub = i % static_cast<std::size_t>(Nsub);
+        subsamples[isub].push_back(Q[i]);
+    }
+
+    return subsamples;
+}
+
+MCGSample BootstrapExactQSampleFromSubsamples(
+    const std::vector<std::vector<double>>& subsamples,
+    TRandom3& rng
+)
+{
+    std::size_t total_size = 0;
+    for(const auto& sub : subsamples)
+        total_size += sub.size();
+
+    MCGSample sample;
+    sample.q.reserve(total_size);
+    sample.weight.reserve(total_size);
+
+    const int Nsub = static_cast<int>(subsamples.size());
+
+    for(int isub = 0; isub < Nsub; ++isub) {
+        const int pick = rng.Integer(Nsub);
+        const auto& picked_subsample = subsamples[static_cast<std::size_t>(pick)];
+
+        sample.q.insert(
+            sample.q.end(),
+            picked_subsample.begin(),
+            picked_subsample.end()
+        );
+    }
+
+    sample.weight.assign(sample.q.size(), 1.0);
+    sample.total_weight = static_cast<double>(sample.q.size());
+    return sample;
+}
+
+// ------------------------------------------------------------
+// Probability density p(phi)
+// ------------------------------------------------------------
+double p_phi(double phi, double v2, double psi2)
+{
+    return (1.0 + 2.0 * v2 * std::cos(2.0 * (phi - psi2))) / (2.0 * M_PI);
+}
+
+// ------------------------------------------------------------
+// Generate one event with M particles using accept/reject
+// ------------------------------------------------------------
+std::vector<double> generate_phi(double v2, double psi2, int M, TRandom3& rng)
+{
+    const double p_max = (1.0 + 2.0 * std::abs(v2)) / (2.0 * M_PI);
+
+    std::vector<double> phis(M);
+    int naccepted = 0;
+
+    while(naccepted < M)
+    {
+        double phi = rng.Uniform(0.0, 2.0 * M_PI);
+        double y   = rng.Uniform(0.0, p_max);
+
+        double p = p_phi(phi, v2, psi2);
+
+        if(y < p)
+        {
+            phis[naccepted] = phi;
+            ++naccepted;
+        }
+    }
+
+    return phis;
+}
+
+void AppendCopiedUniformNonflow(
+    std::vector<double>& event,
+    int nonflow_groups,
+    int nonflow_q,
+    TRandom3& rng
+)
+{
+    if(nonflow_q <= 0 || nonflow_groups <= 0)
+        return;
+
+    event.reserve(
+        event.size() +
+        static_cast<std::size_t>(nonflow_groups) *
+            static_cast<std::size_t>(nonflow_q)
+    );
+
+    for(int igroup = 0; igroup < nonflow_groups; ++igroup) {
+        const double phi = rng.Uniform(0.0, 2.0 * M_PI);
+
+        for(int icopy = 0; icopy < nonflow_q; ++icopy)
+            event.push_back(phi);
+    }
+}
+
+// ------------------------------------------------------------
+// Triangular distribution: min=0, mode=a, max=b
+// Equivalent to numpy.random.triangular(0,a,b)
+// ------------------------------------------------------------
+double sample_v2(double a, double b, TRandom3& rng)
+{
+    double u = rng.Uniform(0.0, 1.0);
+    double c = a / b;
+
+    if(u < c)
+        return std::sqrt(u * a * b);
+    else
+        return b - std::sqrt((1.0 - u) * b * (b - a));
+}
+
+// ------------------------------------------------------------
+// Complex Bessel J0 series
+// Valid and fast enough for the range in this problem.
+// ------------------------------------------------------------
+cd besselJ0_series(cd z, double tol = 1e-15, int max_iter = 10000)
+{
+    cd zz = z * z;
+    cd term = 1.0;
+    cd sum  = term;
+
+    for(int m = 1; m < max_iter; ++m)
+    {
+        term *= -zz / (4.0 * m * m);
+        sum += term;
+
+        if(std::abs(term) < tol * std::max(1.0, std::abs(sum)))
+            break;
+    }
+
+    return sum;
+}
+
+// ------------------------------------------------------------
+// Complex Bessel J1 series
+// ------------------------------------------------------------
+cd besselJ1_series(cd z, double tol = 1e-15, int max_iter = 10000)
+{
+    cd zz = z * z;
+    cd term = 0.5 * z;
+    cd sum  = term;
+
+    for(int m = 1; m < max_iter; ++m)
+    {
+        term *= -zz / (4.0 * m * (m + 1.0));
+        sum += term;
+
+        if(std::abs(term) < tol * std::max(1.0, std::abs(sum)))
+            break;
+    }
+
+    return sum;
+}
+
+// ------------------------------------------------------------
+// Complex Struve H_nu series for nu = 0 or 1
+// H_nu(z) = sum_m (-1)^m (z/2)^(2m+nu+1)
+//           / [ Gamma(m+3/2) Gamma(m+nu+3/2) ]
+// ------------------------------------------------------------
+cd struveH_series(int nu, cd z, double tol = 1e-14, int max_iter = 10000)
+{
+    cd halfz = 0.5 * z;
+    cd sum = 0.0;
+
+    for(int m = 0; m < max_iter; ++m)
+    {
+        double sign = (m % 2 == 0) ? 1.0 : -1.0;
+
+        double denom =
+            std::tgamma(m + 1.5) *
+            std::tgamma(m + nu + 1.5);
+
+        cd term = sign * std::pow(halfz, 2*m + nu + 1) / denom;
+        sum += term;
+
+        if(std::abs(term) < tol * std::max(1.0, std::abs(sum)))
+            break;
+    }
+
+    return sum;
+}
+
+// ------------------------------------------------------------
+// C++ version of your triangleG_scalar(k,a,b)
+// ------------------------------------------------------------
+cd triangleG(cd k, double a, double b)
+{
+    cd ak = a * k;
+    cd bk = b * k;
+
+    cd J0a = besselJ0_series(ak);
+    cd J1a = besselJ1_series(ak);
+    cd J0b = besselJ0_series(bk);
+    cd J1b = besselJ1_series(bk);
+
+    cd H0a = struveH_series(0, ak);
+    cd H1a = struveH_series(1, ak);
+    cd H0b = struveH_series(0, bk);
+    cd H1b = struveH_series(1, bk);
+
+    cd result =
+        (2.0 * J1a) / (b * k)
+        +
+        (
+            (a * J1a * (-2.0 + b*k*M_PI*H0a)) / (b*k)
+            + (J1b * (2.0 - b*k*M_PI*H0b)) / k
+            + a * J0a * (2.0 - M_PI*H1a)
+            + b * J0b * (-2.0 + M_PI*H1b)
+        ) / (a - b);
+
+    return result;
+}
+
+// ------------------------------------------------------------
+// Q_n(theta) = sum_i cos[n(phi_i - theta)]
+// ------------------------------------------------------------
+double Qntheta(int n, const std::vector<double>& phiEvent, double theta)
+{
+    double Q = 0.0;
+
+    for(double phi : phiEvent)
+        Q += std::cos(n * (phi - theta));
+
+    return Q;
+}
+
+cd QnVector(int n, const std::vector<double>& phiEvent)
+{
+    cd Q(0.0, 0.0);
+
+    for(double phi : phiEvent)
+        Q += std::polar(1.0, n * phi);
+
+    return Q;
+}
+
+struct EventCorrelations {
+    double two = NAN;
+    double four = NAN;
+};
+
+EventCorrelations ComputeEventCorrelations(
+    int n,
+    const std::vector<double>& phiEvent
+)
+{
+    EventCorrelations correlations;
+    const double M = static_cast<double>(phiEvent.size());
+
+    if(M < 2.0)
+        return correlations;
+
+    const cd Qn = QnVector(n, phiEvent);
+    const double abs_Qn2 = std::norm(Qn);
+
+    correlations.two = (abs_Qn2 - M) / (M * (M - 1.0));
+
+    if(M < 4.0)
+        return correlations;
+
+    const cd Q2n = QnVector(2 * n, phiEvent);
+    const double abs_Qn4 = abs_Qn2 * abs_Qn2;
+    const double abs_Q2n2 = std::norm(Q2n);
+    const double interference =
+        std::real(Q2n * std::conj(Qn) * std::conj(Qn));
+
+    correlations.four =
+        (
+            abs_Qn4
+            + abs_Q2n2
+            - 2.0 * interference
+            - 2.0 * (2.0 * (M - 2.0) * abs_Qn2 - M * (M - 3.0))
+        ) /
+        (M * (M - 1.0) * (M - 2.0) * (M - 3.0));
+
+    return correlations;
+}
+
+void WriteEventCorrelations(
+    const std::string& filename,
+    int n,
+    int event_multiplicity,
+    const std::vector<EventCorrelations>& correlations
+)
+{
+    std::ofstream out(filename);
+
+    if(!out.is_open())
+        throw std::runtime_error("Cannot open " + filename);
+
+    out << std::setprecision(17);
+    out << "# ievent  n  M  <2>  <4>\n";
+
+    for(std::size_t i = 0; i < correlations.size(); ++i) {
+        const auto& c = correlations[i];
+
+        out << i << " "
+            << n << " "
+            << event_multiplicity << " "
+            << c.two << " "
+            << c.four << "\n";
+    }
+}
+
+std::string AddFilenameSuffix(const std::string& filename, const std::string& suffix)
+{
+    const std::size_t slash_pos = filename.find_last_of("/\\");
+    const std::size_t dot_pos = filename.find_last_of('.');
+
+    if(dot_pos == std::string::npos ||
+       (slash_pos != std::string::npos && dot_pos < slash_pos)) {
+        return filename + suffix;
+    }
+
+    return filename.substr(0, dot_pos) + suffix + filename.substr(dot_pos);
+}
+
+void FindAndWriteRootsForDataset(
+    const std::string& label,
+    const std::vector<double>& Q,
+    int event_multiplicity,
+    int q_bins,
+    int Nsub,
+    int Nresam,
+    int ncore,
+    unsigned int bootstrap_seed,
+    const std::vector<std::pair<double, double>>& root_start_points,
+    const std::string& nominal_output,
+    const std::string& bootstrap_output
+)
+{
+    const QBinLayout q_bin_layout = BuildQBinLayout(q_bins, event_multiplicity);
+    const MCGSample nominal_sample = BuildQSample(Q, q_bin_layout);
+
+    std::cout << "[" << label << "] Root search Q sample entries: "
+              << nominal_sample.q.size()
+              << " weighted points from "
+              << nominal_sample.total_weight
+              << " events\n";
+
+    std::cout << "[" << label << "] Finding MC generating-function zeros from "
+              << root_start_points.size() << " starts\n";
+
+    std::vector<RootResult> mc_roots = FindMCGeneratingZerosFromStarts(
+        nominal_sample,
+        root_start_points,
+        true
+    );
+
+    WriteMCGeneratingRoots(nominal_output, mc_roots);
+
+    std::cout << "[" << label << "] Found " << mc_roots.size()
+              << " nominal unique roots\n";
+    for(std::size_t iroot = 0; iroot < mc_roots.size(); ++iroot) {
+        const auto& r = mc_roots[iroot];
+        std::cout << "[" << label << "] root " << iroot
+                  << ": k = " << r.k
+                  << ", G(k) = " << r.F
+                  << ", status = " << r.status
+                  << "\n";
+    }
+
+    std::vector<std::vector<double>> Q_subsample_bins;
+    std::vector<std::vector<double>> Q_exact_subsamples;
+
+    if(q_bins > 0) {
+        Q_subsample_bins = BuildQSubsampleBins(Q, Nsub, q_bin_layout);
+    } else {
+        Q_exact_subsamples = BuildExactQSubsamples(Q, Nsub);
+    }
+
+    std::vector<std::vector<RootResult>> bootstrap_roots;
+    bootstrap_roots.resize(static_cast<std::size_t>(Nresam));
+
+    std::cout << "[" << label << "] Starting bootstrap root search with "
+              << Nresam << " resamples and "
+              << Nsub << " Q subsamples using "
+              << ncore << " threads\n";
+
+    omp_set_num_threads(ncore);
+    int completed_bootstrap = 0;
+
+    #pragma omp parallel for schedule(dynamic)
+    for(int ires = 0; ires < Nresam; ++ires) {
+        TRandom3 bootstrap_rng(bootstrap_seed + static_cast<unsigned int>(ires));
+        MCGSample Q_bootstrap =
+            (q_bins > 0)
+                ? BootstrapQSampleFromSubsampleBins(
+                      Q_subsample_bins,
+                      q_bin_layout,
+                      bootstrap_rng
+                  )
+                : BootstrapExactQSampleFromSubsamples(
+                      Q_exact_subsamples,
+                      bootstrap_rng
+                  );
+
+        std::vector<RootResult> roots = FindMCGeneratingZerosFromStarts(
+            Q_bootstrap,
+            root_start_points,
+            true
+        );
+
+        bootstrap_roots[static_cast<std::size_t>(ires)] = roots;
+
+        int done = 0;
+        #pragma omp atomic capture
+        done = ++completed_bootstrap;
+
+        #pragma omp critical(print_bootstrap_progress)
+        {
+            std::cout << "[" << label << "] bootstrap "
+                      << done << "/" << Nresam
+                      << " finished: ires=" << ires
+                      << ", roots=" << roots.size()
+                      << "\n";
+        }
+    }
+
+    WriteBootstrapMCGeneratingRoots(
+        bootstrap_output,
+        bootstrap_roots
+    );
+}
+
+void FindAndWriteProductRootsForDataset(
+    const std::string& label,
+    const std::vector<std::vector<cd>>& subsample_coeff_sums,
+    const std::vector<double>& subsample_counts,
+    int Nresam,
+    int ncore,
+    unsigned int bootstrap_seed,
+    const std::vector<std::pair<double, double>>& root_start_points,
+    const std::string& nominal_output,
+    const std::string& bootstrap_output
+)
+{
+    const ProductGSample nominal_sample =
+        BuildProductSampleFromSubsamples(subsample_coeff_sums, subsample_counts);
+
+    std::cout << "[" << label << "] Polynomial generating-function degree: "
+              << (nominal_sample.coeffs.empty()
+                      ? 0
+                      : nominal_sample.coeffs.size() - 1)
+              << ", events = " << nominal_sample.total_weight << "\n";
+
+    std::cout << "[" << label << "] Finding product generating-function zeros from "
+              << root_start_points.size() << " starts\n";
+
+    std::vector<RootResult> roots =
+        FindProductGeneratingZerosFromStarts(nominal_sample, root_start_points);
+
+    WriteMCGeneratingRoots(nominal_output, roots);
+
+    std::cout << "[" << label << "] Found " << roots.size()
+              << " nominal unique roots\n";
+    for(std::size_t iroot = 0; iroot < roots.size(); ++iroot) {
+        const auto& r = roots[iroot];
+        std::cout << "[" << label << "] root " << iroot
+                  << ": z = " << r.k
+                  << ", G(z) = " << r.F
+                  << ", status = " << r.status
+                  << "\n";
+    }
+
+    std::vector<std::vector<RootResult>> bootstrap_roots;
+    bootstrap_roots.resize(static_cast<std::size_t>(Nresam));
+
+    std::cout << "[" << label << "] Starting product bootstrap root search with "
+              << Nresam << " resamples using "
+              << ncore << " threads\n";
+
+    omp_set_num_threads(ncore);
+    int completed_bootstrap = 0;
+
+    #pragma omp parallel for schedule(dynamic)
+    for(int ires = 0; ires < Nresam; ++ires) {
+        TRandom3 bootstrap_rng(bootstrap_seed + static_cast<unsigned int>(ires));
+        ProductGSample bootstrap_sample =
+            BootstrapProductSampleFromSubsamples(
+                subsample_coeff_sums,
+                subsample_counts,
+                bootstrap_rng
+            );
+
+        std::vector<RootResult> local_roots =
+            FindProductGeneratingZerosFromStarts(
+                bootstrap_sample,
+                root_start_points
+            );
+
+        bootstrap_roots[static_cast<std::size_t>(ires)] = local_roots;
+
+        int done = 0;
+        #pragma omp atomic capture
+        done = ++completed_bootstrap;
+
+        #pragma omp critical(print_bootstrap_progress)
+        {
+            std::cout << "[" << label << "] bootstrap "
+                      << done << "/" << Nresam
+                      << " finished: ires=" << ires
+                      << ", roots=" << local_roots.size()
+                      << "\n";
+        }
+    }
+
+    WriteBootstrapMCGeneratingRoots(
+        bootstrap_output,
+        bootstrap_roots
+    );
+}
+
+// ------------------------------------------------------------
+// Main implementation. The ROOT macro wrapper and executable main both call this.
+// ------------------------------------------------------------
+int RunTriangleG(const TriangleGConfig& cfg)
+{
+    std::cout << "Complex bessel: " << besselJ0_series(cd(1.35, 0.5)) << "\n";
+    gStyle->SetOptStat(0);
+    gsl_set_error_handler_off();
+    gErrorIgnoreLevel = kWarning;
+
+    TRandom3 rng(cfg.seed);
+
+    const int M = cfg.M;
+    const int Nevents = cfg.Nevents;
+    const int Nsub = cfg.Nsub;
+    const int Nresam = cfg.Nresam;
+    const int ncore = cfg.ncore;
+    const int q_bins = cfg.q_bins;
+    const int nonflow_q = cfg.nonflow_q;
+    const int requested_M_nonflow =
+        (nonflow_q > 0)
+            ? (cfg.M_nonflow >= 0 ? cfg.M_nonflow : M)
+            : 0;
+    const int nonflow_groups =
+        (nonflow_q > 0)
+            ? (
+                cfg.nonflow_groups >= 0
+                    ? cfg.nonflow_groups
+                    : requested_M_nonflow / nonflow_q
+              )
+            : 0;
+    const int nonflow_particles = nonflow_groups * nonflow_q;
+    const int event_multiplicity = M + nonflow_particles;
+
+    const double a = cfg.a;
+    const double b = cfg.b;
+
+    const int n = cfg.n;
+    const double theta = cfg.theta;
+    const bool use_exponential_roots =
+        cfg.generating_function == "exponential" ||
+        cfg.generating_function == "both" ||
+        cfg.generating_function == "all";
+    const bool use_product_roots =
+        cfg.generating_function == "product" ||
+        cfg.generating_function == "both" ||
+        cfg.generating_function == "all";
+    const bool use_modified_roots =
+        cfg.generating_function == "modified" || cfg.generating_function == "all";
+    const std::vector<double> flow_modified_factors =
+        use_modified_roots
+            ? BuildModifiedProductFactors(M, cfg.modified_gl_nodes)
+            : std::vector<double>();
+    const std::vector<double> combined_modified_factors =
+        use_modified_roots
+            ? BuildModifiedProductFactors(event_multiplicity, cfg.modified_gl_nodes)
+            : std::vector<double>();
+
+    std::cout << std::setprecision(17);
+    std::cout << "Configuration:\n"
+              << "  a = " << a << "\n"
+              << "  b = " << b << "\n"
+              << "  M = " << M << "\n"
+              << "  Nevents = " << Nevents << "\n"
+              << "  Nsub = " << Nsub << "\n"
+              << "  Nresam = " << Nresam << "\n"
+              << "  ncore = " << ncore << "\n"
+              << "  q_bins = " << q_bins << "\n"
+              << "  generating function = " << cfg.generating_function << "\n"
+              << "  modified N_GL = " << cfg.modified_gl_nodes << "\n"
+              << "  nonflow_q = " << nonflow_q << "\n"
+              << "  nonflow_groups = " << nonflow_groups << "\n"
+              << "  nonflow particles = " << nonflow_particles << "\n"
+              << "  flow-only event multiplicity = " << M << "\n"
+              << "  combined event multiplicity = " << event_multiplicity << "\n"
+              << "  correlations output = " << cfg.correlations_output << "\n"
+              << "  root start points = "
+              << cfg.root_start_points.size() << "\n";
+    for(std::size_t istart = 0; istart < cfg.root_start_points.size(); ++istart) {
+        std::cout << "    start " << istart << " = "
+                  << cfg.root_start_points[istart].first
+                  << " + i " << cfg.root_start_points[istart].second
+                  << "\n";
+    }
+
+    cd test_k(0.3, 0.02588);
+    std::cout << "triangleG(0.3 + 0.02588i, 0.04, 0.15) = "
+              << triangleG(test_k, a, b) << "\n";
+
+    std::vector<double> Q_flow(Nevents);
+    std::vector<double> Q_combined(Nevents);
+    std::vector<EventCorrelations> flow_correlations(Nevents);
+    std::vector<EventCorrelations> combined_correlations(Nevents);
+    int completed_events = 0;
+
+    std::vector<std::vector<std::vector<cd>>> flow_product_thread_sums;
+    std::vector<std::vector<std::vector<cd>>> combined_product_thread_sums;
+    std::vector<std::vector<double>> product_thread_counts;
+    std::vector<std::vector<std::vector<cd>>> flow_modified_thread_sums;
+    std::vector<std::vector<std::vector<cd>>> combined_modified_thread_sums;
+    std::vector<std::vector<double>> modified_thread_counts;
+
+    if(use_product_roots) {
+        flow_product_thread_sums.assign(
+            static_cast<std::size_t>(ncore),
+            std::vector<std::vector<cd>>(
+                static_cast<std::size_t>(Nsub),
+                std::vector<cd>(static_cast<std::size_t>(M + 1), cd(0.0, 0.0))
+            )
+        );
+        combined_product_thread_sums.assign(
+            static_cast<std::size_t>(ncore),
+            std::vector<std::vector<cd>>(
+                static_cast<std::size_t>(Nsub),
+                std::vector<cd>(
+                    static_cast<std::size_t>(event_multiplicity + 1),
+                    cd(0.0, 0.0)
+                )
+            )
+        );
+        product_thread_counts.assign(
+            static_cast<std::size_t>(ncore),
+            std::vector<double>(static_cast<std::size_t>(Nsub), 0.0)
+        );
+    }
+
+    if(use_modified_roots) {
+        flow_modified_thread_sums.assign(
+            static_cast<std::size_t>(ncore),
+            std::vector<std::vector<cd>>(
+                static_cast<std::size_t>(Nsub),
+                std::vector<cd>(static_cast<std::size_t>(M + 1), cd(0.0, 0.0))
+            )
+        );
+        combined_modified_thread_sums.assign(
+            static_cast<std::size_t>(ncore),
+            std::vector<std::vector<cd>>(
+                static_cast<std::size_t>(Nsub),
+                std::vector<cd>(
+                    static_cast<std::size_t>(event_multiplicity + 1),
+                    cd(0.0, 0.0)
+                )
+            )
+        );
+        modified_thread_counts.assign(
+            static_cast<std::size_t>(ncore),
+            std::vector<double>(static_cast<std::size_t>(Nsub), 0.0)
+        );
+    }
+
+    omp_set_num_threads(ncore);
+    #pragma omp parallel for schedule(dynamic)
+    for(int i = 0; i < Nevents; ++i)
+    {
+        TRandom3 event_rng(cfg.seed + static_cast<unsigned int>(i));
+        double psi2 = event_rng.Uniform(0.0, M_PI);
+        double v2_evt = sample_v2(a, b, event_rng);
+
+        std::vector<double> flow_event =
+            generate_phi(v2_evt, psi2, M, event_rng);
+        std::vector<double> combined_event = flow_event;
+        AppendCopiedUniformNonflow(
+            combined_event,
+            nonflow_groups,
+            nonflow_q,
+            event_rng
+        );
+        flow_correlations[i] = ComputeEventCorrelations(n, flow_event);
+        combined_correlations[i] = ComputeEventCorrelations(n, combined_event);
+        Q_flow[i] = Qntheta(n, flow_event, theta);
+        Q_combined[i] = Qntheta(n, combined_event, theta);
+
+        if(use_product_roots || use_modified_roots) {
+            const int tid = omp_get_thread_num();
+            const std::size_t thread_index = static_cast<std::size_t>(tid);
+            const std::size_t isub =
+                static_cast<std::size_t>(i % Nsub);
+            const std::vector<cd> flow_product_coeffs =
+                BuildProductCoefficients(n, theta, flow_event);
+            const std::vector<cd> combined_product_coeffs =
+                BuildProductCoefficients(n, theta, combined_event);
+
+            if(use_product_roots) {
+                AddProductCoefficients(
+                    flow_product_thread_sums[thread_index][isub],
+                    flow_product_coeffs
+                );
+                AddProductCoefficients(
+                    combined_product_thread_sums[thread_index][isub],
+                    combined_product_coeffs
+                );
+                product_thread_counts[thread_index][isub] += 1.0;
+            }
+
+            if(use_modified_roots) {
+                AddProductCoefficients(
+                    flow_modified_thread_sums[thread_index][isub],
+                    BuildModifiedProductCoefficients(
+                        flow_product_coeffs,
+                        flow_modified_factors
+                    )
+                );
+                AddProductCoefficients(
+                    combined_modified_thread_sums[thread_index][isub],
+                    BuildModifiedProductCoefficients(
+                        combined_product_coeffs,
+                        combined_modified_factors
+                    )
+                );
+                modified_thread_counts[thread_index][isub] += 1.0;
+            }
+        }
+
+        int done = 0;
+        #pragma omp atomic capture
+        done = ++completed_events;
+
+        if(done % 10000 == 0 || done == Nevents) {
+            #pragma omp critical(print_generation_progress)
+            {
+                std::cout << "Generated " << done << "/" << Nevents << " events\n";
+            }
+        }
+    }
+
+    std::cout << "Done\n";
+
+    std::vector<std::vector<cd>> flow_product_subsample_sums;
+    std::vector<std::vector<cd>> combined_product_subsample_sums;
+    std::vector<double> product_subsample_counts;
+    std::vector<std::vector<cd>> flow_modified_subsample_sums;
+    std::vector<std::vector<cd>> combined_modified_subsample_sums;
+    std::vector<double> modified_subsample_counts;
+
+    if(use_product_roots) {
+        flow_product_subsample_sums.assign(
+            static_cast<std::size_t>(Nsub),
+            std::vector<cd>(static_cast<std::size_t>(M + 1), cd(0.0, 0.0))
+        );
+        combined_product_subsample_sums.assign(
+            static_cast<std::size_t>(Nsub),
+            std::vector<cd>(
+                static_cast<std::size_t>(event_multiplicity + 1),
+                cd(0.0, 0.0)
+            )
+        );
+        product_subsample_counts.assign(static_cast<std::size_t>(Nsub), 0.0);
+
+        for(int tid = 0; tid < ncore; ++tid) {
+            const std::size_t thread_index = static_cast<std::size_t>(tid);
+
+            for(int isub = 0; isub < Nsub; ++isub) {
+                const std::size_t sub_index = static_cast<std::size_t>(isub);
+
+                for(std::size_t icoeff = 0;
+                    icoeff < flow_product_subsample_sums[sub_index].size();
+                    ++icoeff) {
+                    flow_product_subsample_sums[sub_index][icoeff] +=
+                        flow_product_thread_sums[thread_index][sub_index][icoeff];
+                }
+
+                for(std::size_t icoeff = 0;
+                    icoeff < combined_product_subsample_sums[sub_index].size();
+                    ++icoeff) {
+                    combined_product_subsample_sums[sub_index][icoeff] +=
+                        combined_product_thread_sums[thread_index][sub_index][icoeff];
+                }
+
+                product_subsample_counts[sub_index] +=
+                    product_thread_counts[thread_index][sub_index];
+            }
+        }
+    }
+
+    if(use_modified_roots) {
+        flow_modified_subsample_sums.assign(
+            static_cast<std::size_t>(Nsub),
+            std::vector<cd>(static_cast<std::size_t>(M + 1), cd(0.0, 0.0))
+        );
+        combined_modified_subsample_sums.assign(
+            static_cast<std::size_t>(Nsub),
+            std::vector<cd>(
+                static_cast<std::size_t>(event_multiplicity + 1),
+                cd(0.0, 0.0)
+            )
+        );
+        modified_subsample_counts.assign(static_cast<std::size_t>(Nsub), 0.0);
+
+        for(int tid = 0; tid < ncore; ++tid) {
+            const std::size_t thread_index = static_cast<std::size_t>(tid);
+            for(int isub = 0; isub < Nsub; ++isub) {
+                const std::size_t sub_index = static_cast<std::size_t>(isub);
+                AddProductCoefficients(
+                    flow_modified_subsample_sums[sub_index],
+                    flow_modified_thread_sums[thread_index][sub_index]
+                );
+                AddProductCoefficients(
+                    combined_modified_subsample_sums[sub_index],
+                    combined_modified_thread_sums[thread_index][sub_index]
+                );
+                modified_subsample_counts[sub_index] +=
+                    modified_thread_counts[thread_index][sub_index];
+            }
+        }
+    }
+
+    WriteEventCorrelations(
+        AddFilenameSuffix(cfg.correlations_output, "_flow"),
+        n,
+        M,
+        flow_correlations
+    );
+    WriteEventCorrelations(
+        AddFilenameSuffix(cfg.correlations_output, "_combined"),
+        n,
+        event_multiplicity,
+        combined_correlations
+    );
+    std::cout << "Saved event <2> and <4> variants from "
+              << cfg.correlations_output << "\n";
+
+    if(use_exponential_roots) {
+        FindAndWriteRootsForDataset(
+            "flow",
+            Q_flow,
+            M,
+            q_bins,
+            Nsub,
+            Nresam,
+            ncore,
+            cfg.bootstrap_seed,
+            cfg.root_start_points,
+            AddFilenameSuffix(cfg.nominal_output, "_flow"),
+            AddFilenameSuffix(cfg.bootstrap_output, "_flow")
+        );
+
+        FindAndWriteRootsForDataset(
+            "combined",
+            Q_combined,
+            event_multiplicity,
+            q_bins,
+            Nsub,
+            Nresam,
+            ncore,
+            cfg.bootstrap_seed,
+            cfg.root_start_points,
+            AddFilenameSuffix(cfg.nominal_output, "_combined"),
+            AddFilenameSuffix(cfg.bootstrap_output, "_combined")
+        );
+    }
+
+    if(use_product_roots) {
+        const std::string product_flow_suffix =
+            use_exponential_roots ? "_product_flow" : "_flow";
+        const std::string product_combined_suffix =
+            use_exponential_roots ? "_product_combined" : "_combined";
+
+        FindAndWriteProductRootsForDataset(
+            "product-flow",
+            flow_product_subsample_sums,
+            product_subsample_counts,
+            Nresam,
+            ncore,
+            cfg.bootstrap_seed,
+            cfg.root_start_points,
+            AddFilenameSuffix(cfg.nominal_output, product_flow_suffix),
+            AddFilenameSuffix(cfg.bootstrap_output, product_flow_suffix)
+        );
+
+        FindAndWriteProductRootsForDataset(
+            "product-combined",
+            combined_product_subsample_sums,
+            product_subsample_counts,
+            Nresam,
+            ncore,
+            cfg.bootstrap_seed,
+            cfg.root_start_points,
+            AddFilenameSuffix(cfg.nominal_output, product_combined_suffix),
+            AddFilenameSuffix(cfg.bootstrap_output, product_combined_suffix)
+        );
+    }
+
+    if(use_modified_roots) {
+        FindAndWriteProductRootsForDataset(
+            "modified-flow",
+            flow_modified_subsample_sums,
+            modified_subsample_counts,
+            Nresam,
+            ncore,
+            cfg.bootstrap_seed,
+            cfg.root_start_points,
+            AddFilenameSuffix(cfg.nominal_output, "_modified_flow"),
+            AddFilenameSuffix(cfg.bootstrap_output, "_modified_flow")
+        );
+
+        FindAndWriteProductRootsForDataset(
+            "modified-combined",
+            combined_modified_subsample_sums,
+            modified_subsample_counts,
+            Nresam,
+            ncore,
+            cfg.bootstrap_seed,
+            cfg.root_start_points,
+            AddFilenameSuffix(cfg.nominal_output, "_modified_combined"),
+            AddFilenameSuffix(cfg.bootstrap_output, "_modified_combined")
+        );
+    }
+
+    /*
+    // Plotting code kept for later.
+    const int Nr = 200;
+    const double r_min = 0.0;
+    const double r_max = 0.4;
+    const double imag_shift = 0.05420014849053053;
+
+    std::vector<double> r_values(Nr);
+    std::vector<double> G_abs(Nr);
+    std::vector<double> G_real(Nr);
+    std::vector<double> G_imag(Nr);
+    std::vector<double> G_triangle(Nr);
+
+    std::vector<double> G_triangle_real_complex(Nr);
+    std::vector<double> G_triangle_imag_complex(Nr);
+
+    for(int ir = 0; ir < Nr; ++ir)
+    {
+        double r = r_min + (r_max - r_min) * ir / double(Nr - 1);
+        cd z(r, imag_shift);
+
+        r_values[ir] = r;
+
+        cd sumG = 0.0;
+        cd sumGz = 0.0;
+
+        for(int iev = 0; iev < Nevents; ++iev)
+        {
+            sumG  += std::exp(cd(0.0, r * Q[iev]));
+            sumGz += std::exp(cd(0.0, 1.0) * z * Q[iev]);
+        }
+
+        cd G  = sumG  / double(Nevents);
+        cd Gz = sumGz / double(Nevents);
+
+        G_abs[ir]  = std::abs(G);
+        G_real[ir] = std::real(Gz);
+        G_imag[ir] = std::imag(Gz);
+
+        cd tri = std::exp(-double(M) * r * r / 4.0) * triangleG(double(M) * r, a, b);
+        G_triangle[ir] = std::abs(tri);
+
+        cd tri_complex = std::exp(-double(M) * z * z / 4.0) * triangleG(double(M) * z, a, b);
+        G_triangle_real_complex[ir] = std::real(tri_complex);
+        G_triangle_imag_complex[ir] = std::imag(tri_complex);
+
+        if((ir + 1) % 10 == 0)
+            std::cout << ir + 1 << "/" << Nr << "\n";
+    }
+
+    TGraph* g = new TGraph(Nr);
+    TGraph* g_tri = new TGraph(Nr);
+
+    for(int i = 0; i < Nr; ++i)
+    {
+        g->SetPoint(i, r_values[i], G_abs[i]);
+        g_tri->SetPoint(i, r_values[i], G_triangle[i]);
+    }
+
+    TCanvas* c = new TCanvas("c_Gabs", "", 800, 600);
+
+    g->SetTitle(";r;|<e^{i r Q}>|");
+    g->SetLineWidth(3);
+    g->Draw("AL");
+
+    g->GetXaxis()->SetRangeUser(0.0, 0.35);
+    g->GetYaxis()->SetRangeUser(0.0, 0.1);
+
+    g_tri->SetLineColor(kRed);
+    g_tri->SetLineWidth(3);
+    g_tri->SetLineStyle(2);
+    g_tri->Draw("L same");
+
+    TLegend* leg = new TLegend(0.55, 0.70, 0.88, 0.88);
+    leg->AddEntry(g, "Monte Carlo", "l");
+    leg->AddEntry(g_tri, "triangleG", "l");
+    leg->Draw();
+
+    c->SaveAs("Gabs_triangleG_ROOT.pdf");
+    c->SaveAs("Gabs_triangleG_ROOT.png");
+    c->Draw();
+
+    TGraph* g_real = new TGraph(Nr);
+    TGraph* g_imag = new TGraph(Nr);
+    TGraph* g_tri_real = new TGraph(Nr);
+    TGraph* g_tri_imag = new TGraph(Nr);
+
+    for(int i = 0; i < Nr; ++i)
+    {
+        g_real->SetPoint(i, r_values[i], G_real[i]);
+        g_imag->SetPoint(i, r_values[i], G_imag[i]);
+        g_tri_real->SetPoint(i, r_values[i], G_triangle_real_complex[i]);
+        g_tri_imag->SetPoint(i, r_values[i], G_triangle_imag_complex[i]);
+    }
+
+    g_real->SetLineColor(kBlue);
+    g_real->SetLineWidth(3);
+    g_real->SetLineStyle(1);
+
+    g_imag->SetLineColor(kRed);
+    g_imag->SetLineWidth(3);
+    g_imag->SetLineStyle(1);
+
+    g_tri_real->SetLineColor(kBlue);
+    g_tri_real->SetLineWidth(3);
+    g_tri_real->SetLineStyle(2);
+
+    g_tri_imag->SetLineColor(kRed);
+    g_tri_imag->SetLineWidth(3);
+    g_tri_imag->SetLineStyle(2);
+
+    TCanvas* c_compare = new TCanvas("c_compare", "", 900, 700);
+
+    g_real->SetTitle(";r;G(r+i0.0542)");
+    g_real->Draw("AL");
+
+    g_real->GetXaxis()->SetRangeUser(0.1, 0.2);
+    g_real->GetYaxis()->SetRangeUser(-0.01, 0.01);
+
+    g_imag->Draw("L same");
+    g_tri_real->Draw("L same");
+    g_tri_imag->Draw("L same");
+
+    TLegend* leg_compare = new TLegend(0.15, 0.75, 0.30, 0.90);
+    leg_compare->AddEntry(g_real, "Re G", "l");
+    leg_compare->AddEntry(g_imag, "Im G", "l");
+    leg_compare->AddEntry(g_tri_real, "Re triangleG", "l");
+    leg_compare->AddEntry(g_tri_imag, "Im triangleG", "l");
+    leg_compare->Draw();
+
+    c_compare->SaveAs("G_complex_triangleG_ROOT.pdf");
+    c_compare->SaveAs("G_complex_triangleG_ROOT.png");
+    c_compare->Draw();
+    */
+
+    return 0;
+}
+
+// ------------------------------------------------------------
+// ROOT macro wrapper.
+// Run with:
+// root -l triangleG.C
+// ------------------------------------------------------------
+void triangleG()
+{
+    TriangleGConfig cfg;
+    RunTriangleG(cfg);
+}
+
+#ifndef __CLING__
+int main(int argc, char** argv)
+{
+    try {
+        TriangleGConfig cfg = ParseTriangleGArgs(argc, argv);
+        return RunTriangleG(cfg);
+    }
+    catch(const std::exception& e) {
+        std::cerr << "Error: " << e.what() << "\n";
+        std::cerr << "Run with --help for usage.\n";
+        return 1;
+    }
+}
+#endif

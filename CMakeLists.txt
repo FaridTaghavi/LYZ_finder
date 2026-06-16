@@ -49,3 +49,20 @@ target_link_libraries(LYZ PRIVATE
     GSL::gslcblas
     Boost::program_options
 )
+
+set_source_files_properties(triangleG.C PROPERTIES LANGUAGE CXX)
+
+add_executable(triangleG
+    triangleG.C
+)
+
+target_link_libraries(triangleG PRIVATE
+    ROOT::Core
+    ROOT::Graf
+    ROOT::MathCore
+    ROOT::MathMore
+    ROOT::Gpad
+    OpenMP::OpenMP_CXX
+    GSL::gsl
+    GSL::gslcblas
+)
